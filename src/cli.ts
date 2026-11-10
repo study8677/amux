@@ -75,9 +75,9 @@ projects
       const marks = hs.map((h) => (e.ids[h.id] ? pc.green(`✔ ${h.displayName}`) : pc.dim(`· ${h.displayName}`))).join("  ");
       console.log(`  ${marks}  ${pc.bold(e.name)}  ${pc.dim(e.roots.map(short).join(", "))}`);
     }
-    if (res.orphans.length) {
-      console.log(pc.yellow(`\n物理目录不存在（${res.orphans.length}，将跳过）：`));
-      for (const o of res.orphans) console.log(`  ${pc.dim(`[${label(o.harness)}]`)} ${o.name}  ${pc.dim(o.roots.join(", "))}`);
+    if (res.plan.orphans?.length) {
+      console.log(pc.yellow(`\n物理目录不存在（${res.plan.orphans.length}，将跳过）：`));
+      for (const o of res.plan.orphans) console.log(`  ${pc.dim(`[${label(o.harness)}]`)} ${o.name}  ${pc.dim(o.roots.join(", "))}`);
     }
     if (res.plan.actions.length) {
       console.log(pc.cyan(`\n待执行变更（${res.plan.actions.length}）：`));
