@@ -34,9 +34,35 @@ program
   .command("mirror")
   .description("将当前项目最新的对话完整克隆到另一款 Agent（去除 ls/cat 等工具噪音，生成原生会话气泡）")
   .option("-w, --workspace <path>", "工作区目录（默认为当前目录）", process.cwd())
+  .option("-a, --all", "对本机所有项目执行一次性全量会话镜像")
   .option("--to <agent>", "目标 Agent: codex 或 antigravity（不填则自动识别反向注入）")
   .option("--from <agent>", "源 Agent: codex 或 antigravity")
   .action(async (o) => {
+    const { listContextProjects } = await import("./core/engine.js");
+    if (o.all) {
+      console.log(pc.bold(`amux mirror --all`) + pc.dim(` · 正在对本机所有项目执行全量会话克隆...`));
+      const projects = await listContextProjects();
+      let successCount = 0;
+      for (const p of projects) {
+        if (!p.roots.length) continue;
+        const root = p.roots[0];
+        try {
+          const res = await mirrorLatestSession({
+            workspacePath: root,
+            source: o.from,
+            target: o.to,
+          });
+          successCount++;
+          const targetLabel = res.targetAgent === "codex" ? "Codex" : "Antigravity";
+          console.log(`  ${pc.green("✔")} [${p.name}] 成功克隆到 ${targetLabel}「${res.title}」(${res.turnCount} 轮)`);
+        } catch (e) {
+          // Skip projects without valid active sessions
+        }
+      }
+      console.log(pc.green(`\n✔ 全量镜像完成！共成功同步 ${successCount} 个项目的会话。`));
+      return;
+    }
+
     const ws = resolveWorkspace(o.workspace);
     try {
       console.log(pc.bold(`amux mirror`) + pc.dim(` · 正在分析工作区: ${short(ws)}`));

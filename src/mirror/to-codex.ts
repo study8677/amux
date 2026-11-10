@@ -1,4 +1,5 @@
 import { CodexAppServerClient } from '../harness/codex/appserver.js';
+import { findCodexProjectId } from './project-resolver.js';
 import type { MirrorResult, MirrorSession } from './types.js';
 
 export async function mirrorToCodex(session: MirrorSession): Promise<MirrorResult> {
@@ -6,9 +7,12 @@ export async function mirrorToCodex(session: MirrorSession): Promise<MirrorResul
   await client.start();
 
   try {
-    // 1. Start a new thread under the target project cwd
+    const projectId = findCodexProjectId(session.workspacePath);
+
+    // 1. Start a new thread under the target project cwd and bind projectId if found
     const startRes: any = await client.request('thread/start', {
       cwd: session.workspacePath,
+      ...(projectId ? { projectId } : {}),
     });
 
     const threadId: string = startRes.thread?.id || startRes.threadId || startRes.id;

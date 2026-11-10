@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
 import { ANTIGRAVITY_APP_DATA, ANTIGRAVITY_SUMMARIES_DB } from '../core/paths.js';
+import { findAntigravityProjectId } from './project-resolver.js';
 import type { MirrorResult, MirrorSession } from './types.js';
 
 export async function mirrorToAntigravity(session: MirrorSession): Promise<MirrorResult> {
@@ -45,11 +46,14 @@ export async function mirrorToAntigravity(session: MirrorSession): Promise<Mirro
 
   fs.writeFileSync(transcriptPath, lines.join('\n') + '\n', 'utf-8');
 
-  // Also write an empty/initial artifact task.md or walkthrough.md if helpful
+  // Also write an initial task.md
   const artifactNote = `# ${session.title}\n\n本会话由 amux 自动从 Codex 镜像接入。\n`;
   fs.writeFileSync(path.join(brainDir, 'task.md'), artifactNote, 'utf-8');
 
-  // 2. Register into conversation_summaries.db
+  // 2. Resolve project_id
+  const projectId = findAntigravityProjectId(session.workspacePath) || '';
+
+  // 3. Register into conversation_summaries.db
   if (fs.existsSync(ANTIGRAVITY_SUMMARIES_DB)) {
     const db = new Database(ANTIGRAVITY_SUMMARIES_DB, { timeout: 5000 });
     try {
@@ -67,10 +71,11 @@ export async function mirrorToAntigravity(session: MirrorSession): Promise<Mirro
           status,
           source,
           app_data_dir,
+          project_id,
           last_user_input_time,
           last_user_input_step_index
         ) VALUES (
-          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
         )
       `);
 
@@ -84,6 +89,7 @@ export async function mirrorToAntigravity(session: MirrorSession): Promise<Mirro
         'DONE',
         'USER_EXPLICIT',
         ANTIGRAVITY_APP_DATA,
+        projectId,
         nowIso,
         0
       );

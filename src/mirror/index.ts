@@ -37,7 +37,7 @@ function findLatestCodexSession(workspacePath: string): LatestAgentSession | nul
         .prepare(
           `SELECT id, title, name, rollout_path, updated_at_ms, created_at_ms
            FROM threads
-           WHERE cwd = ? AND archived = 0
+           WHERE cwd = ? AND archived = 0 AND COALESCE(name, title, '') NOT LIKE '%[来自 Antigravity]%'
            ORDER BY COALESCE(updated_at_ms, created_at_ms * 1000) DESC
            LIMIT 1`
         )
@@ -83,7 +83,7 @@ function findLatestAntigravitySession(workspacePath: string): LatestAgentSession
         .prepare(
           `SELECT conversation_id, title, last_modified_time
            FROM conversation_summaries
-           WHERE workspace_uris LIKE ?
+           WHERE workspace_uris LIKE ? AND title NOT LIKE '%[来自 Codex]%'
            ORDER BY last_modified_time DESC
            LIMIT 1`
         )
