@@ -8,7 +8,6 @@ import { loadConfig } from "./config.js";
 import { exists, normRoot } from "./paths.js";
 import { getHarness, getHarnesses } from "../harness/registry.js";
 import { gitSnapshot, ensureGitExclude, type GitSnapshot } from "../collectors/git.js";
-import { writeHandoff } from "../injectors/handoff-md.js";
 import { loadRegistry, syncProjects } from "../projects/sync.js";
 import { projectKey } from "../projects/reconcile.js";
 
@@ -124,20 +123,11 @@ export async function syncProjectContext(
   const state = await compact({ project: { name: project.name, roots: project.roots }, events, manual, git: mergedGit(project.roots) });
 
   if (opts.dryRun) {
-    const { renderHandoff } = await import("../injectors/handoff-md.js");
-    return { project, newEvents, newTurns, sessions: sessions.length, state, handoffFiles: [], markdown: renderHandoff(state) };
+    return { project, newEvents, newTurns, sessions: sessions.length, state, handoffFiles: [] };
   }
   store.saveState(state);
   store.saveCursors(cursors);
-  const handoffFiles = writeHandoff(state, project.roots);
-  for (const r of project.roots) {
-    try {
-      ensureGitExclude(r, ".amux/");
-    } catch {
-      /* not a git repo */
-    }
-  }
-  return { project, newEvents, newTurns, sessions: sessions.length, state, handoffFiles };
+  return { project, newEvents, newTurns, sessions: sessions.length, state, handoffFiles: [] };
 }
 
 /** One-shot: sync a single workspace (used by `amux sync`, `amux init`, MCP). */

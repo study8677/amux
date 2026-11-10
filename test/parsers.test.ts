@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import { parseCodexItems, parseCodexLines, unwrapShell } from "../src/harness/codex/parser.js";
 import { cleanAgyUserText, decodeArg, parseAgyLines } from "../src/harness/antigravity/parser.js";
 import { routeSessions } from "../src/core/router.js";
-import { removeBlock, upsertBlock } from "../src/injectors/blocks.js";
 import { compactRules } from "../src/core/compactor/rules.js";
 import type { NormalizedEvent, SessionRef } from "../src/core/types.js";
 
@@ -109,17 +108,6 @@ describe("router", () => {
     ]);
     expect(r.get("app")?.map((x) => x.id)).toEqual(["1"]);
     expect(r.get("ddn")?.map((x) => x.id)).toEqual(["2"]);
-  });
-});
-
-describe("marker blocks", () => {
-  it("upserts idempotently and preserves user content", () => {
-    const base = "1.中文回复我\n";
-    const once = upsertBlock(base, "hello");
-    expect(upsertBlock(once, "hello")).toBe(once);
-    expect(once.startsWith("1.中文回复我\n")).toBe(true);
-    expect(upsertBlock(once, "world")).toContain("world");
-    expect(removeBlock(once).trim()).toBe("1.中文回复我");
   });
 });
 

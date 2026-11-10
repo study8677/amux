@@ -2,14 +2,14 @@
 
 # ⚡ amux (Agent Multiplexer)
 
-**AI 编程 Agent 界的 `tmux`。在 OpenAI Codex 与 Google Antigravity 之间实现无缝上下文接力、原生会话双向克隆与项目列表同步。**
+**AI 编程 Agent 界的 `tmux`。在 OpenAI Codex 与 Google Antigravity 之间实现原生会话双向克隆与项目列表同步。**
 
 [![GitHub Stars](https://img.shields.io/github/stars/study8677/amux?style=for-the-badge&logo=github&color=gold)](https://github.com/study8677/amux/stargazers)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge)](https://opensource.org/licenses/MIT)
 [![Node.js Version](https://img.shields.io/badge/node-%3E%3D20-brightgreen.svg?style=for-the-badge&logo=node.js)](https://nodejs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.0+-blue.svg?style=for-the-badge&logo=typescript)](https://www.typescriptlang.org/)
 
-[English](README.md) · [简体中文](README_CN.md) · [系统架构设计](docs/architecture.md)
+[English](README.md) · [简体中文](README_CN.md)
 
 </div>
 
@@ -17,40 +17,32 @@
 
 ## 💡 为什么需要 amux？
 
-在现代 AI 辅助研发中，很多开发者会同时使用 **OpenAI Codex** 和 **Google Antigravity**。然而，当你在同一个项目中从一个 Agent 切换到另一个时，通常会遇到以下四大痛点：
+如果你在日常开发中同时使用 **OpenAI Codex** 和 **Google Antigravity**，你一定深受以下折磨：
 
-| 痛点场景 | 以前的折磨 😩 | 使用 amux 之后 🚀 |
-| :--- | :--- | :--- |
-| **上下文断层** | 换个工具就得在输入框长篇大论重新交代背景、刚刚改了哪、做到哪一步。 | **零冷启动接力**：新 Agent 启动瞬间自动感知全部前序背景。 |
-| **重复踩坑** | Codex 刚试过一个报错走不通的方案，切到 Antigravity，它又推荐了一遍一模一样的坑。 | **避坑雷达 (`Tried & Failed`)**：自动提炼历史报错与走不通的路径，严禁后序 Agent 重复尝试。 |
-| **会话割裂** | Antigravity 聊了半天，Codex 界面里一片空白，必须来回切窗口看历史。 | **原生会话克隆 (Mirror)**：自动将对话直接以**清晰的气泡**克隆在另一边的历史列表里，输入框接着聊！ |
-| **项目列表不同步** | 在一边建了新项目，另一边又得手动点半天重新导入。 | **双向项目自动对齐**：任意一边新建/改名/删除，全机自动双向同步。 |
+- **会话割裂**：在 Antigravity 聊了半天，切到 Codex 历史列表是一片空白。你必须在输入框长篇大论重新交代背景，或者两边来回翻看旧记录。
+- **工具噪音污染**：原始会话里充斥着几十次底层的探测命令（`ls`、`cat`、`pwd`）和错误堆栈，直接塞给另一个 Agent 既浪费 Token 又容易导致混乱。
+- **项目不同步**：在一个工具里新建或改名了项目，另一个工具里又得手动重复建一遍。
+
+**`amux` 用最直观的方式终结了这一切**：
+> 在任意一个 Agent 里聊完，切到另一个 Agent，**整段对话已经以清爽的原生聊天气泡排在左侧列表里了**，点进去直接敲键盘接着聊！
 
 ---
 
 ## 🌟 核心特性
 
 ### 🔄 1. 双向原生会话克隆（去除一切工具噪音）
-- 在 Antigravity 聊完，打开 Codex Desktop，左侧列表里**已为你准备好刚刚的完整会话**！
-- **智能去噪过滤器**：坚决剔除 `ls`、`cat`、`pwd` 等底层探测命令、错误堆栈与系统标签，只保留真实的人类提问与 Agent 给出的代码方案及结论。
+- 在 Antigravity 聊完代码，打开 Codex Desktop，左侧列表里**已为你准备好刚刚的完整会话**！
+- **智能去噪过滤器**：坚决剔除 `ls`、`cat`、`pwd` 等底层探测命令、错误堆栈与系统注入标签，只保留真实的人类提问与 Agent 给出的代码方案及结论。
 - **官方接口级安全注入**：调用 Codex 官方内置 `app-server` 的 JSON-RPC 接口（`thread/start` + `thread/inject_items`），绝不暴力直接修改 SQLite 数据库。
 
-### 🧠 2. 实时交接状态蒸馏 (`.amux/HANDOFF.md`)
-- 自动提取最近对话，蒸馏生成高信噪比、极低 Token 占用的交接摘要。
-- 核心提炼字段：
-  - 🎯 **当前推进目标 (Objective)**
-  - 📐 **已敲定架构设计决策 (Decisions)**
-  - 🚫 **重点避坑区 (Tried & Failed)**：防止下一个 Agent 踩同一个坑
-  - 📂 **最近读写热点文件 (Active Files)**
-
-### 🗂 3. 全局项目双向自动对齐
+### 🗂 2. 全局项目双向自动对齐
 - 自动发现 Codex 和 Antigravity 在当前电脑上的全部项目；
 - 支持项目新建、改名、删除双向同步；
 - 内置写前自动快照备份与**“单次删除超过 30% 自动熔断暂停”**的安全防护网。
 
-### 🔌 4. 内置标准 MCP Server
-- 原生支持 Model Context Protocol (MCP) stdio 协议；
-- 为 Agent 提供专属工具：`get_handoff_context`、`record_decision_or_pitfall`、`list_projects`。
+### ⚡ 3. 零感知后台守护进程
+- 内存常驻 < 40MB，近乎零 CPU 占用；
+- 监听到对话产生并停顿 3 秒后，自动将提纯后的会话克隆到对向 Agent。
 
 ---
 
@@ -58,7 +50,7 @@
 
 ```text
                ┌────────────────────────────────────────────────────────┐
-               │             amux 跨 Agent 四层数据流架构                │
+               │             amux 跨 Agent 极简架构                      │
                └────────────────────────────────────────────────────────┘
 
     ┌──────────────────────────┐                          ┌──────────────────────────┐
@@ -79,16 +71,14 @@
                                             │
                                             ▼
     ┌────────────────────────────────────────────────────────────────────────────────┐
-    │ 3. 双轨投递与克隆层                                                            │
-    │    ├─ 通道 A (会话级克隆 Mirror)：                                              │
-    │    │   ├─ Codex: 官方 `thread/start` + `thread/inject_items` RPC 注入原生会话   │
-    │    │   └─ Antigravity: 写入 `transcript.jsonl` + 注册 summaries.db             │
-    │    └─ 通道 B (HANDOFF.md 备忘与 MCP stdio 服务)                                 │
+    │ 3. 原生会话克隆引擎                                                            │
+    │    ├─ Codex 注入       : 官方 `thread/start` + `thread/inject_items` RPC 注入   │
+    │    └─ Antigravity 注入 : 写入原生 `transcript.jsonl` + 注册 summaries.db       │
     └───────────────────────────────────────┬────────────────────────────────────────┘
                                             │
                                             ▼
     ┌────────────────────────────────────────────────────────────────────────────────┐
-    │ 4. CLI & Daemon 层 (`amux mirror`, `amux daemon`, `amux projects`)             │
+    │ 4. CLI & Background Supervisor (`amux mirror`, `amux projects`, `amux daemon`) │
     └────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -116,22 +106,7 @@ npm run build
 npm link
 ```
 
-### 1. 一键全局初始化
-注入全局 Agent 行为守则（`~/.codex/AGENTS.md` 和 `~/.gemini/GEMINI.md`）并注册 amux MCP 服务：
-```bash
-amux setup
-```
-
-### 2. 双向对齐项目列表
-```bash
-# 预览将要对齐的项目
-amux projects sync
-
-# 正式执行对齐（写前自动备份）
-amux projects sync --yes
-```
-
-### 3. 一键克隆/镜像当前会话
+### 1. 一键克隆当前会话
 在 Antigravity 聊完，想切到 Codex 接着聊？
 ```bash
 amux mirror
@@ -142,11 +117,20 @@ amux mirror · 正在分析工作区: ~/Documents/project2/amux
 ✔ 镜像克隆成功！已注入到 OpenAI Codex
   · 会话标题: [来自 Antigravity] 优化数据库查询与前端渲染
   · 提纯轮次: 16 轮 (已剥离所有系统提示词与 ls/cat 工具噪音)
-  · 会话 ID: 01a1c46b-1acb-71a3-866b-3448f7a0a486
+  · 会话 ID: 01a1c558-fd6f-7c20-b442-26bd55581d37
   👉 打开 Codex Desktop 即可在左侧列表看到该会话，直接输入继续交流！
 ```
 
-### 4. 启动静默后台守护进程（全程免手动）
+### 2. 双向对齐项目列表
+```bash
+# 预览将要对齐的项目
+amux projects list
+
+# 正式执行对齐（写前自动备份）
+amux projects sync --yes
+```
+
+### 3. 启动后台静默守护进程（全程免手动）
 ```bash
 # 启动后台守护进程
 amux daemon start
@@ -160,17 +144,15 @@ amux daemon log
 
 ---
 
-## 💻 CLI 常用命令速查
+## 💻 CLI 命令速查
 
 ```bash
 amux mirror               # 将当前项目最新会话清洗并克隆到对向 Agent
 amux projects list        # 查看 Codex 与 Antigravity 的项目配对状态
 amux projects sync --yes  # 立即执行项目双向对齐
-amux watch                # 前台实时监听面板（显示捕获轮次与刷新日志）
-amux sync                 # 立即刷新当前项目的 HANDOFF.md
-amux status               # 查看当前项目的交接状态摘要（目标/踩坑/决策）
 amux daemon start|stop    # 启动/停止后台守护进程
-amux mcp                  # 以 stdio 模式启动 MCP 服务
+amux daemon status        # 查看守护进程状态
+amux daemon log           # 查看实时镜像克隆日志
 ```
 
 ---
@@ -180,13 +162,6 @@ amux mcp                  # 以 stdio 模式启动 MCP 服务
 1. **零破坏写入**：写 Codex 会话一律走其原生内置的 `codex app-server` RPC 通道，杜绝在应用运行时直接修改主 SQLite 数据库导致的文件损坏或死锁。
 2. **写前自动快照**：任何涉及项目配置变更的操作，均在 `~/.amux/backups/` 保留带时间戳的完整备份。
 3. **批量删除熔断保护**：当自动检测到单次删除项目超过 30% 时，强制暂停并等待人工 `--yes` 确认。
-4. **Git 无侵入**：自动将 `.amux/` 维护在 `.git/info/exclude` 中，绝不污染代码库的历史提交。
-
----
-
-## 🤝 参与贡献
-
-欢迎提出 Issue 和 PR！更多开发细节请阅读 [贡献指南](CONTRIBUTING.md)。
 
 ---
 
