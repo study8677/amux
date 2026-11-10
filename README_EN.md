@@ -46,6 +46,61 @@ If you frequently juggle between **OpenAI Codex** and **Google Antigravity** dur
 
 ---
 
+## ⚡ Quickstart (Let Your AI Agent Install It)
+
+No need to run tedious manual terminal commands! **Copy and paste the snippet below to your active AI agent (Codex / Antigravity / Cursor / Claude)**:
+
+> 🤖 **Prompt for your AI Agent:**
+> 
+> ```markdown
+> Please install and configure amux (Agent Multiplexer) for me:
+> 1. Clone https://github.com/study8677/amux locally and run `npm install && npm run build && npm link`
+> 2. Run `amux projects sync --yes` to align my local Codex and Antigravity projects
+> 3. Run `amux daemon start` to launch the background daemon, and report the live status
+> ```
+
+---
+
+<details>
+<summary>🛠️ <b>Prefer manual installation? Click to expand terminal steps</b></summary>
+
+### 1. Clone & Link
+```bash
+git clone https://github.com/study8677/amux.git
+cd amux
+npm install
+npm run build
+npm link
+```
+
+### 2. Align Projects Across Agents
+```bash
+# Preview
+amux projects list
+
+# Apply alignment (automatically backs up existing configs before write)
+amux projects sync --yes
+```
+
+### 3. Mirror a Conversation Instantly
+```bash
+amux mirror
+```
+
+### 4. Run the Background Daemon (Zero-Touch Mirroring)
+```bash
+# Start background daemon
+amux daemon start
+
+# Check status & logs
+amux daemon status
+amux daemon log
+```
+
+</details>
+
+---
+
 ## 🏗 Architecture Pipeline
 
 ```text
@@ -87,68 +142,6 @@ If you frequently juggle between **OpenAI Codex** and **Google Antigravity** dur
     │    - `amux projects` : Bi-directional project alignment                        │
     │    - `amux daemon`   : Headless background supervisor for continuous sync      │
     └────────────────────────────────────────────────────────────────────────────────┘
-```
-
----
-
-## ⚡ Quickstart
-
-### Prerequisites
-- macOS (Linux / Windows support in progress)
-- Node.js >= 20.0.0
-- OpenAI Codex Desktop & Google Antigravity installed
-
-### Installation
-
-```bash
-# Clone the repository
-git clone https://github.com/study8677/amux.git
-cd amux
-
-# Install dependencies and build
-npm install
-npm run build
-
-# Link CLI globally
-npm link
-```
-
-### 1. Mirror a Conversation Instantly
-Finished a conversation in Antigravity and want to continue in Codex (or vice-versa)?
-```bash
-amux mirror
-```
-*Output:*
-```text
-amux mirror · Analyzing workspace: ~/Documents/project2/amux
-✔ Mirroring successful! Injected into OpenAI Codex
-  · Thread Title: [From Antigravity] Optimize database queries
-  · Turns Distilled: 16 turns (stripped tool execution noise)
-  · Thread ID: 01a1c558-fd6f-7c20-b442-26bd55581d37
-  👉 Open Codex Desktop — the session is ready in your sidebar!
-```
-
-### 2. Align Projects Across Agents
-Preview or perform full two-way project synchronization:
-```bash
-# Preview what projects will be aligned
-amux projects list
-
-# Apply alignment (automatically backs up existing configs before write)
-amux projects sync --yes
-```
-
-### 3. Run the Background Daemon (Zero-Touch Mirroring)
-Start the background daemon so that every conversation is automatically synced within 3 seconds of going idle:
-```bash
-# Start background daemon
-amux daemon start
-
-# Check status
-amux daemon status
-
-# View live sync activity
-amux daemon log
 ```
 
 ---

@@ -47,6 +47,62 @@
 
 ---
 
+## ⚡ 极速上手（让你的 AI 帮你一键搞定）
+
+不用自己繁琐地敲命令！**复制下面这段话直接发送给你当前的 AI 编程助手（Antigravity / Codex / Cursor / Claude 等）**，让它帮你全自动克隆、编译并启动：
+
+> 🤖 **把以下指令发给你的 AI：**
+> 
+> ```markdown
+> 请帮我安装并配置 amux (Agent Multiplexer)：
+> 1. 在本地克隆 https://github.com/study8677/amux 并执行 npm install && npm run build && npm link
+> 2. 执行 amux projects sync --yes 对齐我电脑上的 Codex 和 Antigravity 项目列表
+> 3. 执行 amux daemon start 在后台启动守护进程，并告诉我运行状态
+> ```
+
+---
+
+<details>
+<summary>🛠️ <b>喜欢纯手动安装？点击展开手动命令行步骤</b></summary>
+
+### 1. 克隆与全局链接
+```bash
+git clone https://github.com/study8677/amux.git
+cd amux
+npm install
+npm run build
+npm link
+```
+
+### 2. 双向对齐项目列表
+```bash
+# 预览
+amux projects list
+
+# 执行安全对齐（写前自动备份）
+amux projects sync --yes
+```
+
+### 3. 一键克隆当前会话
+在 Antigravity 聊完，想切到 Codex 接着聊？
+```bash
+amux mirror
+```
+
+### 4. 启动后台守护进程（全程免手动）
+```bash
+# 启动后台守护进程
+amux daemon start
+
+# 查看状态与实时日志
+amux daemon status
+amux daemon log
+```
+
+</details>
+
+---
+
 ## 🏗 整体架构全景
 
 ```text
@@ -81,66 +137,6 @@
     ┌────────────────────────────────────────────────────────────────────────────────┐
     │ 4. CLI & Background Supervisor (`amux mirror`, `amux projects`, `amux daemon`) │
     └────────────────────────────────────────────────────────────────────────────────┘
-```
-
----
-
-## ⚡ 极速上手
-
-### 环境要求
-- macOS（Linux / Windows 适配进行中）
-- Node.js >= 20.0.0
-- 电脑已安装 OpenAI Codex Desktop 与 Google Antigravity
-
-### 安装与构建
-
-```bash
-# 克隆仓库
-git clone https://github.com/study8677/amux.git
-cd amux
-
-# 安装依赖并构建
-npm install
-npm run build
-
-# 链接 CLI 到系统全局命令
-npm link
-```
-
-### 1. 一键克隆当前会话
-在 Antigravity 聊完，想切到 Codex 接着聊？
-```bash
-amux mirror
-```
-*终端输出效果：*
-```text
-amux mirror · 正在分析工作区: ~/Documents/project2/amux
-✔ 镜像克隆成功！已注入到 OpenAI Codex
-  · 会话标题: [来自 Antigravity] 优化数据库查询与前端渲染
-  · 提纯轮次: 16 轮 (已剥离所有系统提示词与 ls/cat 工具噪音)
-  · 会话 ID: 01a1c558-fd6f-7c20-b442-26bd55581d37
-  👉 打开 Codex Desktop 即可在左侧列表看到该会话，直接输入继续交流！
-```
-
-### 2. 双向对齐项目列表
-```bash
-# 预览将要对齐的项目
-amux projects list
-
-# 正式执行对齐（写前自动备份）
-amux projects sync --yes
-```
-
-### 3. 启动后台静默守护进程（全程免手动）
-```bash
-# 启动后台守护进程
-amux daemon start
-
-# 查看后台运行状态
-amux daemon status
-
-# 实时查看同步日志
-amux daemon log
 ```
 
 ---
