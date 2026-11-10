@@ -8,6 +8,9 @@ const home = os.homedir();
 export const AMUX_HOME = process.env.AMUX_HOME ?? path.join(home, ".amux");
 export const CODEX_HOME = process.env.CODEX_HOME ?? path.join(home, ".codex");
 export const AGY_HOME = process.env.AMUX_AGY_HOME ?? path.join(home, ".gemini", "antigravity");
+export const AGY_SUMMARIES_DB = path.join(AGY_HOME, "conversation_summaries.db");
+export const ANTIGRAVITY_APP_DATA = AGY_HOME;
+export const ANTIGRAVITY_SUMMARIES_DB = AGY_SUMMARIES_DB;
 export const AGY_PROJECTS_DIR =
   process.env.AMUX_AGY_PROJECTS_DIR ?? path.join(home, ".gemini", "config", "projects");
 export const AGY_MCP_CONFIG =

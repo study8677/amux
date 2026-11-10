@@ -116,8 +116,22 @@ export async function runDaemon(opts: { quiet?: boolean } = {}): Promise<void> {
     running.add(key);
     try {
       const res = await syncProjectContext(project, sessions);
-      for (const [agent, n] of Object.entries(res.newTurns))
+      for (const [agent, n] of Object.entries(res.newTurns)) {
         log(`${label(agent)} → amux`, `${project.name}：捕获 ${n} 轮新对话，HANDOFF.md 已同步`);
+        // 自动触发对向镜像注入
+        try {
+          const { mirrorLatestSession } = await import("../mirror/index.js");
+          const target = agent === "codex" ? "antigravity" : "codex";
+          const mirrorRes = await mirrorLatestSession({
+            workspacePath: project.roots[0],
+            source: agent as any,
+            target,
+          });
+          log("amux → mirror", `${project.name}：已自动镜像到 ${label(target)}「${mirrorRes.title}」（${mirrorRes.turnCount} 轮）`);
+        } catch (mirrorErr) {
+          log("amux → mirror", `镜像失败：${(mirrorErr as Error).message}`, "warn");
+        }
+      }
       const quietEvents = Object.entries(res.newEvents).filter(([a]) => !res.newTurns[a]);
       for (const [agent, n] of quietEvents) log(`${label(agent)} → amux`, `${project.name}：${n} 条新事件，HANDOFF.md 已同步`, "debug");
     } catch (e) {

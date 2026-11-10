@@ -1,7 +1,7 @@
 {
   "name": "amux",
   "version": "0.1.0",
-  "description": "Agent Multiplexer — keep context, projects and pitfalls in sync across AI coding agent harnesses (Codex, Antigravity, ...)",
+  "description": "Agent Multiplexer (amux) — The tmux for AI Coding Agents. Seamlessly sync projects, handoff context, and share pitfall memories across Codex, Antigravity, Claude Code, and beyond.",
   "type": "module",
   "bin": {
     "amux": "dist/cli.js"
@@ -9,6 +9,7 @@
   "files": [
     "dist",
     "README.md",
+    "README_CN.md",
     "LICENSE"
   ],
   "engines": {
@@ -22,12 +23,19 @@
   },
   "keywords": [
     "ai",
-    "agents",
+    "ai-agents",
+    "multiplexer",
+    "tmux",
+    "agent-harness",
+    "context-engineering",
     "codex",
     "antigravity",
+    "claude-code",
+    "cursor",
     "mcp",
+    "mcp-server",
     "handoff",
-    "context"
+    "developer-tools"
   ],
   "license": "MIT",
   "dependencies": {

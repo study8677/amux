@@ -284,6 +284,38 @@ program
   });
 
 program
+  .command("mirror")
+  .description("将当前项目最新的对话完整克隆到另一款 Agent（过滤 ls/cat 等噪音，生成原生会话气泡）")
+  .option("-w, --workspace <path>", "工作区目录（默认为当前目录）", process.cwd())
+  .option("--to <agent>", "目标 Agent: codex 或 antigravity（不填则自动识别反向注入）")
+  .option("--from <agent>", "源 Agent: codex 或 antigravity")
+  .action(async (o) => {
+    const ws = resolveWorkspace(o.workspace);
+    const { mirrorLatestSession } = await import("./mirror/index.js");
+    try {
+      console.log(pc.bold(`amux mirror`) + pc.dim(` · 正在分析工作区: ${short(ws)}`));
+      const res = await mirrorLatestSession({
+        workspacePath: ws,
+        source: o.from,
+        target: o.to,
+      });
+      const targetLabel = res.targetAgent === "codex" ? "OpenAI Codex" : "Google Antigravity";
+      console.log(`${pc.green("✔")} 镜像克隆成功！已注入到 ${pc.bold(targetLabel)}`);
+      console.log(`  · 会话标题: ${pc.cyan(res.title)}`);
+      console.log(`  · 提纯轮次: ${pc.yellow(res.turnCount.toString())} 轮 (已剥离所有系统提示词与 ls/cat 工具噪音)`);
+      console.log(`  · 会话 ID: ${pc.dim(res.targetSessionId)}`);
+      if (res.targetAgent === "codex") {
+        console.log(`  ${pc.dim("👉 打开 Codex Desktop 即可在左侧列表看到该会话，直接输入继续交流！")}`);
+      } else {
+        console.log(`  ${pc.dim("👉 打开 Antigravity 即可在历史列表看到该会话，直接输入继续交流！")}`);
+      }
+    } catch (e) {
+      console.error(pc.red(`镜像失败: ${(e as Error).message}`));
+      process.exit(1);
+    }
+  });
+
+program
   .command("mcp")
   .description("以 stdio 模式启动 MCP Server")
   .action(async () => {
