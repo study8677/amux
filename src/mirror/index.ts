@@ -3,6 +3,7 @@ import path from 'node:path';
 import Database from 'better-sqlite3';
 import { ANTIGRAVITY_APP_DATA, ANTIGRAVITY_SUMMARIES_DB } from '../core/paths.js';
 import { findStateDb } from '../harness/codex/index.js';
+import { getLastSync, isMirrorTarget, sessionFingerprint } from './state.js';
 import { extractAntigravitySession } from './extract-antigravity.js';
 import { extractCodexSession } from './extract-codex.js';
 import { mirrorToAntigravity } from './to-antigravity.js';
@@ -33,34 +34,36 @@ function findLatestCodexSession(workspacePath: string): LatestAgentSession | nul
   try {
     const db = new Database(stateDbPath, { readonly: true, fileMustExist: true });
     try {
-      const row = db
+      const rows = db
         .prepare(
           `SELECT id, title, name, rollout_path, updated_at_ms, created_at_ms
            FROM threads
-           WHERE cwd = ? AND archived = 0 AND COALESCE(name, title, '') NOT LIKE '%[来自 Antigravity]%'
+           WHERE cwd = ? AND archived = 0 AND agent_role IS NULL AND COALESCE(name, title, '') NOT LIKE '%[来自 Antigravity]%'
            ORDER BY COALESCE(updated_at_ms, created_at_ms * 1000) DESC
-           LIMIT 1`
+           LIMIT 20`
         )
-        .get(workspacePath) as
-        | {
-            id: string;
-            title: string;
-            name: string | null;
-            rollout_path: string;
-            updated_at_ms: number;
-            created_at_ms: number;
-          }
-        | undefined;
+        .all(workspacePath) as Array<{
+          id: string;
+          title: string;
+          name: string | null;
+          rollout_path: string;
+          updated_at_ms: number;
+          created_at_ms: number;
+        }>;
 
-      if (!row || !row.rollout_path) return null;
+      for (const row of rows) {
+        if (isMirrorTarget(row.id)) continue;
+        if (!row.rollout_path || !fs.existsSync(row.rollout_path)) continue;
 
-      return {
-        agent: 'codex',
-        id: row.id,
-        title: row.name || row.title || 'Codex Session',
-        updatedAtMs: row.updated_at_ms || row.created_at_ms * 1000,
-        filePath: row.rollout_path,
-      };
+        return {
+          agent: 'codex',
+          id: row.id,
+          title: row.name || row.title || 'Codex Session',
+          updatedAtMs: row.updated_at_ms || row.created_at_ms * 1000,
+          filePath: row.rollout_path,
+        };
+      }
+      return null;
     } finally {
       db.close();
     }
@@ -79,40 +82,43 @@ function findLatestAntigravitySession(workspacePath: string): LatestAgentSession
     const db = new Database(ANTIGRAVITY_SUMMARIES_DB, { readonly: true, fileMustExist: true });
     try {
       const pattern = `%"file://${workspacePath}"%`;
-      const row = db
+      const rows = db
         .prepare(
           `SELECT conversation_id, title, last_modified_time
            FROM conversation_summaries
            WHERE workspace_uris LIKE ? AND title NOT LIKE '%[来自 Codex]%'
            ORDER BY last_modified_time DESC
-           LIMIT 1`
+           LIMIT 20`
         )
-        .get(pattern) as
-        | {
-            conversation_id: string;
-            title: string;
-            last_modified_time: string;
-          }
-        | undefined;
+        .all(pattern) as Array<{
+          conversation_id: string;
+          title: string;
+          last_modified_time: string;
+        }>;
 
-      if (!row) return null;
+      for (const row of rows) {
+        if (isMirrorTarget(row.conversation_id)) continue;
 
-      const transcriptPath = path.join(
-        ANTIGRAVITY_APP_DATA,
-        'brain',
-        row.conversation_id,
-        '.system_generated',
-        'logs',
-        'transcript.jsonl'
-      );
+        const transcriptPath = path.join(
+          ANTIGRAVITY_APP_DATA,
+          'brain',
+          row.conversation_id,
+          '.system_generated',
+          'logs',
+          'transcript.jsonl'
+        );
 
-      return {
-        agent: 'antigravity',
-        id: row.conversation_id,
-        title: row.title || 'Antigravity Session',
-        updatedAtMs: new Date(row.last_modified_time).getTime(),
-        filePath: transcriptPath,
-      };
+        if (!fs.existsSync(transcriptPath)) continue;
+
+        return {
+          agent: 'antigravity',
+          id: row.conversation_id,
+          title: row.title || 'Antigravity Session',
+          updatedAtMs: new Date(row.last_modified_time).getTime(),
+          filePath: transcriptPath,
+        };
+      }
+      return null;
     } finally {
       db.close();
     }
@@ -172,6 +178,19 @@ export async function mirrorLatestSession(options: MirrorOptions): Promise<Mirro
       throw new Error(`Antigravity 会话中没有可提取的有效对话内容`);
     }
 
+    const lastSync = getLastSync(antigravityLatest.id);
+    if (lastSync && lastSync.targetAgent === 'codex' && lastSync.fingerprint === sessionFingerprint(session)) {
+      return {
+        targetAgent: 'codex',
+        targetSessionId: lastSync.targetSessionId,
+        title: session.title,
+        turnCount: session.turns.length,
+        workspacePath: normWorkspace,
+        skipped: true,
+        sourceSessionId: session.sourceSessionId,
+      };
+    }
+
     return await mirrorToCodex(session);
   } else {
     // source === 'codex' && target === 'antigravity'
@@ -188,6 +207,19 @@ export async function mirrorLatestSession(options: MirrorOptions): Promise<Mirro
 
     if (!session || session.turns.length === 0) {
       throw new Error(`Codex 会话中没有可提取的有效对话内容`);
+    }
+
+    const lastSync = getLastSync(codexLatest.id);
+    if (lastSync && lastSync.targetAgent === 'antigravity' && lastSync.fingerprint === sessionFingerprint(session) && lastSync.nativeReadbackVerifiedAt !== undefined && lastSync.nativeStorageVersion === 2 && fs.existsSync(path.join(ANTIGRAVITY_APP_DATA, 'conversations', `${lastSync.targetSessionId}.db`))) {
+      return {
+        targetAgent: 'antigravity',
+        targetSessionId: lastSync.targetSessionId,
+        title: session.title,
+        turnCount: session.turns.length,
+        workspacePath: normWorkspace,
+        skipped: true,
+        sourceSessionId: session.sourceSessionId,
+      };
     }
 
     return await mirrorToAntigravity(session);

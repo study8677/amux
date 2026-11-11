@@ -43,7 +43,7 @@
 
 ### ⚡ 3. 零感知后台守护进程
 - 内存常驻 < 40MB，近乎零 CPU 占用；
-- 监听到对话产生并停顿 3 秒后，自动将提纯后的会话克隆到对向 Agent。
+- 对话事件防抖 3 秒后自动克隆，并每 10 秒扫描会话变化作为兜底。
 
 ---
 
@@ -101,6 +101,14 @@ amux daemon log
 
 </details>
 
+### 本机运行状态页
+
+执行 `amux daemon start` 后，打开 [运行状态页](http://127.0.0.1:4317)。页面每 5 秒刷新后台心跳、最近扫描、同步结果、错误和项目配对。
+
+macOS 使用两个独立的 launchd 服务运行同步后台和状态页，支持登录启动及异常退出自动恢复。`amux daemon stop` 会暂停同步，状态页继续显示停止状态。再次执行 `amux daemon start` 可恢复。
+
+页面会分别显示历史写入记录和原生读回校验结果。状态页还会显示最近一次模型续聊、回复落盘及独立重载的验收结果。Antigravity 原生导入已在本机 2.31 版本验证。
+
 ---
 
 ## 🏗 整体架构全景
@@ -130,7 +138,7 @@ amux daemon log
     ┌────────────────────────────────────────────────────────────────────────────────┐
     │ 3. 原生会话克隆引擎                                                            │
     │    ├─ Codex 注入       : 官方 `thread/start` + `thread/inject_items` RPC 注入   │
-    │    └─ Antigravity 注入 : 写入原生 `transcript.jsonl` + 注册 summaries.db       │
+    │    └─ Antigravity 注入 : 原生 SQLite 模板 + `LoadSharedTrajectory` 导入       │
     └───────────────────────────────────────┬────────────────────────────────────────┘
                                             │
                                             ▼
@@ -150,6 +158,7 @@ amux projects sync --yes  # 立即执行项目双向对齐
 amux daemon start|stop    # 启动/停止后台守护进程
 amux daemon status        # 查看守护进程状态
 amux daemon log           # 查看实时镜像克隆日志
+amux dashboard            # 单独启动本机运行状态页
 ```
 
 ---

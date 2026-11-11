@@ -9,4 +9,5 @@ export default defineConfig({
   sourcemap: true,
   banner: { js: "#!/usr/bin/env node" },
   external: ["better-sqlite3"],
+  noExternal: ["commander", "picocolors", "chokidar", "readdirp"],
 });

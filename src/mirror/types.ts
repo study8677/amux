@@ -14,9 +14,12 @@ export interface MirrorSession {
 }
 
 export interface MirrorResult {
+  sourceSessionId?: string;
+  nativeReadbackVerified?: boolean;
   targetAgent: 'codex' | 'antigravity';
   targetSessionId: string;
   title: string;
   turnCount: number;
   workspacePath: string;
+  skipped?: boolean;
 }

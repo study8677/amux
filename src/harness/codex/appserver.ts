@@ -35,7 +35,8 @@ export class CodexAppServerClient {
 
   async start(): Promise<void> {
     if (this.proc) return;
-    const proc = spawn(this.bin, ["app-server"], {
+    // Mirror imports and project updates can initialize under launchd without a login-shell snapshot.
+    const proc = spawn(this.bin, ["app-server", "--disable", "shell_snapshot"], {
       env: { ...process.env, CODEX_HOME },
       stdio: ["pipe", "pipe", "pipe"],
     });

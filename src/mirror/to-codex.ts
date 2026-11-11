@@ -1,11 +1,14 @@
+import fs from 'node:fs';
 import { CodexAppServerClient } from '../harness/codex/appserver.js';
 import { findCodexProjectId } from './project-resolver.js';
+import { recordMirrorTarget, sessionFingerprint } from './state.js';
 import type { MirrorResult, MirrorSession } from './types.js';
 
 export async function mirrorToCodex(session: MirrorSession): Promise<MirrorResult> {
   const client = new CodexAppServerClient();
   await client.start();
 
+  let createdThreadId: string | undefined;
   try {
     const projectId = findCodexProjectId(session.workspacePath);
 
@@ -20,10 +23,16 @@ export async function mirrorToCodex(session: MirrorSession): Promise<MirrorResul
       throw new Error(`Failed to create thread in Codex: unexpected response ${JSON.stringify(startRes)}`);
     }
 
-    // 2. Set the thread name
+    createdThreadId = threadId;
+
+    // 2. Set the thread name with [来自 Antigravity] tag to prevent loopback
+    const titleWithTag = session.title.includes('[来自 Antigravity]')
+      ? session.title
+      : `${session.title} [来自 Antigravity]`;
+
     await client.request('thread/name/set', {
       threadId,
-      name: session.title,
+      name: titleWithTag,
     });
 
     // 3. Inject clean conversational turns
@@ -60,13 +69,33 @@ export async function mirrorToCodex(session: MirrorSession): Promise<MirrorResul
       });
     }
 
+    const readback = await client.request('thread/read', { threadId, includeTurns: true });
+    if (readback.thread?.id !== threadId || !readback.thread.path) throw new Error('Codex 原生会话读回失败');
+    const storedMessages = fs.readFileSync(readback.thread.path, 'utf8').split('\n').filter(Boolean)
+      .map((line) => JSON.parse(line))
+      .filter((entry) => entry.type === 'response_item' && entry.payload?.type === 'message'
+        && ['user', 'assistant'].includes(entry.payload.role))
+      .map((entry) => ({ role: entry.payload.role, text: entry.payload.content.map((part: any) => part.text ?? '').join(''), timestamp: 0 }));
+    const tail = storedMessages.slice(-session.turns.length);
+    if (sessionFingerprint({ ...session, turns: tail }) !== sessionFingerprint(session)) {
+      throw new Error('Codex 原生会话磁盘读回内容不匹配');
+    }
+    recordMirrorTarget(threadId, 'codex', session.sourceSessionId, session.turns.length, {
+      fingerprint: sessionFingerprint(session), nativeReadbackVerifiedAt: Date.now(),
+    });
+
     return {
+      sourceSessionId: session.sourceSessionId,
+      nativeReadbackVerified: true,
       targetAgent: 'codex',
       targetSessionId: threadId,
-      title: session.title,
+      title: titleWithTag,
       turnCount: session.turns.length,
       workspacePath: session.workspacePath,
     };
+  } catch (error) {
+    if (createdThreadId) await client.request('thread/archive', { threadId: createdThreadId }).catch(() => {});
+    throw error;
   } finally {
     await client.stop();
   }

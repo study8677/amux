@@ -9,8 +9,12 @@ import { getHarnesses } from "./harness/registry.js";
 import { label } from "./core/compactor/rules.js";
 import { syncProjects, loadRegistry, REGISTRY_FILE } from "./projects/sync.js";
 import type { Action } from "./projects/reconcile.js";
-import { daemonPid, LOG_FILE, runDaemon, startDaemonDetached, stopDaemon } from "./daemon/daemon.js";
+import { daemonPid, HEALTH_FILE, LOG_FILE, runDaemon, startDaemonDetached, stopDaemon } from "./daemon/daemon.js";
 import { mirrorLatestSession } from "./mirror/index.js";
+import { installServices, serviceInstalled, stopService } from "./daemon/service.js";
+import { startDashboard } from "./dashboard/index.js";
+import { getDashboardStatus } from "./dashboard/status.js";
+import { readJson } from "./core/jsonl.js";
 
 const short = (p: string) => (p.startsWith(HOME_DIR) ? "~" + p.slice(HOME_DIR.length) : p);
 
@@ -101,9 +105,9 @@ projects
       const marks = hs.map((h) => (e.ids[h.id] ? pc.green(`✔ ${h.displayName}`) : pc.dim(`· ${h.displayName}`))).join("  ");
       console.log(`  ${marks}  ${pc.bold(e.name)}  ${pc.dim(e.roots.map(short).join(", "))}`);
     }
-    if (res.plan.orphans?.length) {
-      console.log(pc.yellow(`\n物理目录不存在（${res.plan.orphans.length}，将跳过）：`));
-      for (const o of res.plan.orphans) console.log(`  ${pc.dim(`[${label(o.harness)}]`)} ${o.name}  ${pc.dim(o.roots.join(", "))}`);
+    if (res.plan.skipped.length) {
+      console.log(pc.yellow(`\n跳过的项目（${res.plan.skipped.length}）：`));
+      for (const item of res.plan.skipped) console.log(`  ${item.name}  ${pc.dim(item.reason)}`);
     }
     if (res.plan.actions.length) {
       console.log(pc.cyan(`\n待执行变更（${res.plan.actions.length}）：`));
@@ -141,24 +145,35 @@ const daemon = program.command("daemon").description("全局后台守护进程�
 daemon
   .command("start")
   .description("在后台启动常驻守护进程")
-  .action(() => {
+  .action(async () => {
     const pid = daemonPid();
-    if (pid) {
-      console.log(pc.yellow(`amux daemon 已在运行中 (PID: ${pid})`));
-      return;
+    if (pid && !serviceInstalled()) {
+      stopDaemon();
+      for (let i = 0; i < 30 && daemonPid(); i++) await new Promise((resolve) => setTimeout(resolve, 100));
+      if (daemonPid()) throw new Error("旧后台进程仍在退出，请稍后重试");
     }
-    const newPid = startDaemonDetached(cliPath());
-    console.log(pc.green(`✔ amux daemon 已在后台启动 (PID: ${newPid})`));
-    console.log(pc.dim(`  日志文件: ${short(LOG_FILE)}`));
-    console.log(pc.dim("  查看状态: amux daemon status"));
-    console.log(pc.dim("  停止运行: amux daemon stop"));
+    if (process.platform === "darwin") await installServices(cliPath());
+    else if (!pid) startDaemonDetached(cliPath());
+    for (let i = 0; i < 100; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const health = readJson<{ pid?: number; heartbeatAt?: string }>(HEALTH_FILE, {});
+      if (daemonPid() === health.pid && Date.now() - Date.parse(health.heartbeatAt ?? "") < 5000) {
+        console.log(pc.green(`✔ amux 后台运行中 (PID: ${health.pid})`));
+        console.log(pc.dim(process.platform === "darwin" ? "  已启用登录启动和异常退出自动恢复" : "  已启动后台进程"));
+        console.log("  状态页面 http://127.0.0.1:4317");
+        return;
+      }
+    }
+    throw new Error(`启动后未收到健康心跳，请查看 ${LOG_FILE}`);
   });
 
 daemon
   .command("stop")
   .description("停止后台守护进程")
   .action(() => {
-    const ok = stopDaemon();
+    const wasRunning = !!daemonPid();
+    stopService();
+    const ok = stopDaemon() || wasRunning;
     if (ok) console.log(pc.green("✔ amux daemon 已停止"));
     else console.log(pc.yellow("amux daemon 未在运行"));
   });
@@ -167,13 +182,13 @@ daemon
   .command("status")
   .description("查看后台守护进程状态")
   .action(() => {
-    const pid = daemonPid();
-    if (pid) {
-      console.log(pc.green(`● amux daemon 正在运行中 (PID: ${pid})`));
-      console.log(pc.dim(`  日志: ${short(LOG_FILE)}`));
-    } else {
-      console.log(pc.dim("○ amux daemon 未运行"));
-    }
+    const status = getDashboardStatus();
+    const labels = { running: "后台心跳正常", degraded: "后台需要检查", stopped: "后台已停止" };
+    console.log(`${status.state === "running" ? "●" : "○"} amux ${labels[status.state]}`);
+    if (status.pid) console.log(`  PID ${status.pid}`);
+    if (status.health.lastError) console.log(`  最近错误 ${status.health.lastError}`);
+    console.log("  状态页面 http://127.0.0.1:4317");
+    console.log(pc.dim(`  日志 ${short(LOG_FILE)}`));
   });
 
 daemon
@@ -197,6 +212,16 @@ daemon
   .option("-q, --quiet", "静默模式，只写日志文件")
   .action(async (o) => {
     await runDaemon({ quiet: !!o.quiet });
+  });
+
+program.command("dashboard")
+  .description("启动本机运行状态页")
+  .option("--port <port>", "监听端口", "4317")
+  .action(async (options) => {
+    const port = Number(options.port);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("端口必须是 1 到 65535 的整数");
+    await startDashboard({ port });
+    console.log(`amux 状态页面 http://127.0.0.1:${port}`);
   });
 
 program.parseAsync(process.argv).catch((e) => {
