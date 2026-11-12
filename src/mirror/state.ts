@@ -8,20 +8,22 @@ import { AMUX_HOME } from '../core/paths.js';
 
 const STATE_FILE = path.join(AMUX_HOME, 'mirror-state.json');
 
-interface Verification {
+export interface Verification {
   fingerprint?: string;
   nativeReadbackVerifiedAt?: number;
   nativeStorageVersion?: number;
 }
 
-interface MirrorTargetInfo extends Verification {
+export interface MirrorTargetInfo extends Verification {
   agent: 'codex' | 'antigravity';
   sourceId: string;
   turnCount: number;
   createdAt: number;
+  supersededAt?: number;
+  preservedUserContinuation?: boolean;
 }
 
-interface SourceSyncInfo extends Verification {
+export interface SourceSyncInfo extends Verification {
   targetAgent: 'codex' | 'antigravity';
   targetSessionId: string;
   turnCount: number;
@@ -88,4 +90,146 @@ export function recordMirrorTarget(
 export function getLastSync(sourceSessionId: string): SourceSyncInfo | null {
   const state = loadState();
   return state.sourceSyncMap[sourceSessionId] || null;
+}
+
+/** Find all active (not yet superseded) mirror targets created for the same source session */
+export function getPriorMirrorTargets(
+  sourceSessionId: string,
+  targetAgent: 'codex' | 'antigravity',
+  keepTargetId?: string
+): Array<{ targetSessionId: string; info: MirrorTargetInfo }> {
+  const state = loadState();
+  const seen = new Map<string, MirrorTargetInfo>();
+
+  for (const [id, info] of Object.entries(state.mirroredTargets)) {
+    if (id === keepTargetId) continue;
+    if (info.agent !== targetAgent || info.sourceId !== sourceSessionId) continue;
+    if (info.supersededAt) continue;
+    seen.set(id, info);
+  }
+
+  const last = state.sourceSyncMap[sourceSessionId];
+  if (last && last.targetAgent === targetAgent && last.targetSessionId !== keepTargetId && !seen.has(last.targetSessionId)) {
+    const existing = state.mirroredTargets[last.targetSessionId];
+    if (!existing?.supersededAt) {
+      seen.set(last.targetSessionId, existing ?? {
+        agent: targetAgent,
+        sourceId: sourceSessionId,
+        turnCount: last.turnCount,
+        createdAt: last.updatedAt,
+        fingerprint: last.fingerprint,
+        nativeReadbackVerifiedAt: last.nativeReadbackVerifiedAt,
+        nativeStorageVersion: last.nativeStorageVersion,
+      });
+    }
+  }
+
+  return [...seen.entries()]
+    .map(([targetSessionId, info]) => ({ targetSessionId, info }))
+    .sort((a, b) => a.info.createdAt - b.info.createdAt);
+}
+
+/** List all unsuperseded mirror targets currently recorded in state */
+export function getUnsupersededMirrorTargets(
+  retryTargetIds?: ReadonlySet<string>
+): Array<{ targetSessionId: string; info: MirrorTargetInfo }> {
+  const state = loadState();
+  return Object.entries(state.mirroredTargets)
+    .filter(([id, info]) => !info.supersededAt || Boolean(info.preservedUserContinuation && retryTargetIds?.has(id)))
+    .map(([targetSessionId, info]) => ({ targetSessionId, info }));
+}
+
+/** Group unsuperseded mirror targets that share the same (agent, sourceId) and return stale duplicates */
+export function getAllUnsupersededDuplicateGroups(retryTargetIds?: ReadonlySet<string>): Array<{
+  sourceId: string;
+  targetAgent: 'codex' | 'antigravity';
+  keepTargetId: string;
+  staleTargets: Array<{ targetSessionId: string; info: MirrorTargetInfo }>;
+}> {
+  const state = loadState();
+  const groups = new Map<string, Array<{ targetSessionId: string; info: MirrorTargetInfo }>>();
+
+  for (const [targetSessionId, info] of Object.entries(state.mirroredTargets)) {
+    const retryPreserved = Boolean(info.preservedUserContinuation && retryTargetIds?.has(targetSessionId));
+    if (info.supersededAt && !retryPreserved) continue;
+    const key = `${info.agent}:${info.sourceId}`;
+    const list = groups.get(key) ?? [];
+    list.push({ targetSessionId, info });
+    groups.set(key, list);
+  }
+
+  const out: Array<{
+    sourceId: string;
+    targetAgent: 'codex' | 'antigravity';
+    keepTargetId: string;
+    staleTargets: Array<{ targetSessionId: string; info: MirrorTargetInfo }>;
+  }> = [];
+
+  for (const [, entries] of groups) {
+    if (entries.length < 2) continue;
+    const { agent: targetAgent, sourceId } = entries[0].info;
+    const mappedId = state.sourceSyncMap[sourceId]?.targetAgent === targetAgent
+      ? state.sourceSyncMap[sourceId].targetSessionId
+      : undefined;
+
+    const sorted = [...entries].sort((a, b) => {
+      if (targetAgent === 'antigravity') {
+        const va = a.info.nativeStorageVersion ?? 0;
+        const vb = b.info.nativeStorageVersion ?? 0;
+        if (vb !== va) return vb - va;
+      }
+      if (a.targetSessionId === mappedId) return -1;
+      if (b.targetSessionId === mappedId) return 1;
+      return b.info.createdAt - a.info.createdAt;
+    });
+
+    const keepTargetId = sorted[0].targetSessionId;
+    const staleTargets = sorted.slice(1);
+    out.push({ sourceId, targetAgent, keepTargetId, staleTargets });
+  }
+
+  return out;
+}
+
+/** Mark a mirror target as superseded (retaining its ID in mirroredTargets to prevent loopback) */
+export function markMirrorTargetSuperseded(
+  targetSessionId: string,
+  options: {
+    preservedUserContinuation?: boolean;
+    dropSourceId?: string;
+    fallback?: { agent: 'codex' | 'antigravity'; sourceId: string; turnCount: number };
+  } = {}
+): void {
+  fs.mkdirSync(AMUX_HOME, { recursive: true });
+  const lock = new Database(path.join(AMUX_HOME, 'state-lock.sqlite'), { timeout: 5000 });
+  try {
+    lock.exec('BEGIN IMMEDIATE');
+    const state = loadState();
+    const now = Date.now();
+    const current = state.mirroredTargets[targetSessionId];
+    if (current) {
+      current.supersededAt = now;
+      if (options.preservedUserContinuation) {
+        current.preservedUserContinuation = true;
+      } else {
+        delete current.preservedUserContinuation;
+      }
+    } else if (options.fallback) {
+      state.mirroredTargets[targetSessionId] = {
+        agent: options.fallback.agent,
+        sourceId: options.fallback.sourceId,
+        turnCount: options.fallback.turnCount,
+        createdAt: now,
+        supersededAt: now,
+        ...(options.preservedUserContinuation ? { preservedUserContinuation: true } : {}),
+      };
+    }
+    if (options.dropSourceId && state.sourceSyncMap[options.dropSourceId]?.targetSessionId === targetSessionId) {
+      delete state.sourceSyncMap[options.dropSourceId];
+    }
+    writeJson(STATE_FILE, state);
+    lock.exec('COMMIT');
+  } finally {
+    lock.close();
+  }
 }

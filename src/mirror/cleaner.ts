@@ -29,9 +29,11 @@ export function cleanAntigravityUserInput(raw: string): string {
  */
 export function cleanCodexUserInput(raw: string): string {
   let text = raw;
+  text = text.replace(/^#\s*AGENTS\.md instructions for[^\n]*\n+<INSTRUCTIONS>[\s\S]*?<\/INSTRUCTIONS>\s*/gi, '');
   text = text.replace(/<environment_context>[\s\S]*?<\/environment_context>/gi, '');
   text = text.replace(/<permissions>[\s\S]*?<\/permissions>/gi, '');
   text = text.replace(/<system_instructions>[\s\S]*?<\/system_instructions>/gi, '');
+  text = text.replace(/<user_instructions>[\s\S]*?<\/user_instructions>/gi, '');
   return text.trim();
 }
 

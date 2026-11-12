@@ -10,7 +10,7 @@ import { label } from "./core/compactor/rules.js";
 import { syncProjects, loadRegistry, REGISTRY_FILE } from "./projects/sync.js";
 import type { Action } from "./projects/reconcile.js";
 import { daemonPid, HEALTH_FILE, LOG_FILE, runDaemon, startDaemonDetached, stopDaemon } from "./daemon/daemon.js";
-import { mirrorLatestSession } from "./mirror/index.js";
+import { mirrorLatestSession, reconcileMirrorDuplicates } from "./mirror/index.js";
 import { installServices, serviceInstalled, stopService } from "./daemon/service.js";
 import { startDashboard } from "./dashboard/index.js";
 import { getDashboardStatus } from "./dashboard/status.js";
@@ -45,6 +45,10 @@ program
     const { listContextProjects } = await import("./core/engine.js");
     if (o.all) {
       console.log(pc.bold(`amux mirror --all`) + pc.dim(` · 正在对本机所有项目执行全量会话克隆...`));
+      const cleaned = await reconcileMirrorDuplicates().catch(() => ({ antigravityDeleted: 0, codexArchived: 0 }));
+      if (cleaned.antigravityDeleted > 0 || cleaned.codexArchived > 0) {
+        console.log(`  ${pc.cyan("✦")} 已清理历史重复镜像会话 (Antigravity: ${cleaned.antigravityDeleted}, Codex: ${cleaned.codexArchived})`);
+      }
       const projects = await listContextProjects();
       let successCount = 0;
       for (const p of projects) {
@@ -56,27 +60,34 @@ program
             source: o.from,
             target: o.to,
           });
-          successCount++;
-          const targetLabel = res.targetAgent === "codex" ? "Codex" : "Antigravity";
-          console.log(`  ${pc.green("✔")} [${p.name}] 成功克隆到 ${targetLabel}「${res.title}」(${res.turnCount} 轮)`);
+          if (!res.skipped) {
+            successCount++;
+            const targetLabel = res.targetAgent === "codex" ? "Codex" : "Antigravity";
+            console.log(`  ${pc.green("✔")} [${p.name}] 成功克隆到 ${targetLabel}「${res.title}」(${res.turnCount} 轮)`);
+          }
         } catch (e) {
           // Skip projects without valid active sessions
         }
       }
-      console.log(pc.green(`\n✔ 全量镜像完成！共成功同步 ${successCount} 个项目的会话。`));
+      console.log(pc.green(`\n✔ 全量镜像完成！共新增/更新 ${successCount} 个项目的会话。`));
       return;
     }
 
     const ws = resolveWorkspace(o.workspace);
     try {
       console.log(pc.bold(`amux mirror`) + pc.dim(` · 正在分析工作区: ${short(ws)}`));
+      await reconcileMirrorDuplicates().catch(() => {});
       const res = await mirrorLatestSession({
         workspacePath: ws,
         source: o.from,
         target: o.to,
       });
       const targetLabel = res.targetAgent === "codex" ? "OpenAI Codex" : "Google Antigravity";
-      console.log(`${pc.green("✔")} 镜像克隆成功！已注入到 ${pc.bold(targetLabel)}`);
+      if (res.skipped) {
+        console.log(`${pc.green("✔")} 当前最新会话已在 ${pc.bold(targetLabel)} 中同步，无需重复创建镜像`);
+      } else {
+        console.log(`${pc.green("✔")} 镜像克隆成功！已注入到 ${pc.bold(targetLabel)}`);
+      }
       console.log(`  · 会话标题: ${pc.cyan(res.title)}`);
       console.log(`  · 提纯轮次: ${pc.yellow(res.turnCount.toString())} 轮 (已剥离所有系统提示词与 ls/cat 工具噪音)`);
       console.log(`  · 会话 ID: ${pc.dim(res.targetSessionId)}`);

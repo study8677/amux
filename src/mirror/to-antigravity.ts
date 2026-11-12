@@ -7,6 +7,7 @@ import { findAntigravityProjectId } from './project-resolver.js';
 import { recordMirrorTarget, sessionFingerprint } from './state.js';
 import { antigravityRequest } from './antigravity-api.js';
 import { prepareNativeImport, validateNativeStorageFormat } from './antigravity-storage.js';
+import { cleanupSupersededAntigravityTargets, deleteAntigravityMirrorFiles } from './dedup.js';
 import type { MirrorResult, MirrorSession } from './types.js';
 
 export async function mirrorToAntigravity(session: MirrorSession): Promise<MirrorResult> {
@@ -58,15 +59,22 @@ export async function mirrorToAntigravity(session: MirrorSession): Promise<Mirro
       step_index: index, type: turn.role === 'user' ? 'USER_INPUT' : 'PLANNER_RESPONSE',
       created_at: new Date(turn.timestamp || Date.now()).toISOString(), content: turn.text,
     })).join('\n') + '\n');
+    const fp = sessionFingerprint(session);
     recordMirrorTarget(id, 'antigravity', session.sourceSessionId, session.turns.length, {
-      fingerprint: sessionFingerprint(session), nativeReadbackVerifiedAt: Date.now(), nativeStorageVersion: 2,
+      fingerprint: fp, nativeReadbackVerifiedAt: Date.now(), nativeStorageVersion: 2,
     });
+    await cleanupSupersededAntigravityTargets(session.sourceSessionId, id, {
+      workspacePath: session.workspacePath,
+      title,
+      fingerprint: fp,
+      turnCount: session.turns.length,
+    }).catch(() => {});
     return { targetAgent: 'antigravity', targetSessionId: id, sourceSessionId: session.sourceSessionId,
       title, turnCount: session.turns.length, workspacePath: session.workspacePath, nativeReadbackVerified: true };
   } catch (error) {
     try {
       await antigravityRequest('DeleteCascadeTrajectory', { cascadeId: requestedId });
-      fs.rmSync(path.join(directory, `${requestedId}.db`), { force: true });
+      deleteAntigravityMirrorFiles(requestedId);
     } catch { /* Retain backing storage when native cleanup is unavailable. */ }
     throw error;
   } finally {

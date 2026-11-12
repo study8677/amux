@@ -9,6 +9,7 @@ import { log } from "../../core/log.js";
 import type { CollectResult, Cursor, HarnessAdapter, ProjectInput, ProjectStore } from "../types.js";
 import { parseCodexItems, parseCodexLines, type ThreadItemRow } from "./parser.js";
 import { CodexAppServerClient, findCodexBin, listAllProjects } from "./appserver.js";
+import { codexUserThreadPredicates, isCodexSubagentPayload } from "../../mirror/dedup.js";
 
 /** Find the newest `state_N.sqlite` (Codex bumps N on breaking migrations). */
 export function findStateDb(): string | null {
@@ -76,7 +77,7 @@ function scanRollouts(sinceMs: number): SessionRef[] {
         if (st.mtimeMs <= sinceMs) continue;
         const meta = parseJsonLine<any>(readFirstLine(p) ?? "");
         const pl = meta?.payload;
-        if (!pl?.cwd || pl.agent_role) continue;
+        if (!pl?.cwd || isCodexSubagentPayload(pl)) continue;
         out.push({ harness: "codex", id: pl.id ?? e.name, paths: [normRoot(pl.cwd)], updatedAt: st.mtimeMs, file: p });
       }
     }
@@ -209,11 +210,16 @@ export function createCodexAdapter(opts: { codexBin?: string } = {}): HarnessAda
       const db = findStateDb();
       if (db) {
         try {
-          return withDb(db, (d) =>
-            d
+          return withDb(db, (d) => {
+            const cols = d.all<{ name: string }>("PRAGMA table_info(threads)").map((c) => c.name);
+            const predicates = codexUserThreadPredicates(cols).join(" AND ");
+            const titleExpr = cols.includes("name")
+              ? "COALESCE(NULLIF(name, ''), NULLIF(title, ''), '')"
+              : "COALESCE(title, '')";
+            return d
               .all<{ id: string; cwd: string; title: string; rollout_path: string; updated_at_ms: number | null; updated_at: number }>(
-                `SELECT id, cwd, title, rollout_path, updated_at_ms, updated_at FROM threads
-                 WHERE archived = 0 AND agent_role IS NULL AND COALESCE(updated_at_ms, updated_at * 1000) > ?`,
+                `SELECT id, cwd, ${titleExpr} AS title, rollout_path, updated_at_ms, updated_at FROM threads
+                 WHERE ${predicates} AND COALESCE(updated_at_ms, updated_at * 1000) > ?`,
                 sinceMs,
               )
               .map((r) => ({
@@ -224,8 +230,8 @@ export function createCodexAdapter(opts: { codexBin?: string } = {}): HarnessAda
                 updatedAt: r.updated_at_ms ?? r.updated_at * 1000,
                 // live rollout when present, otherwise the projected history DB
                 file: r.rollout_path && exists(r.rollout_path) ? r.rollout_path : HISTORY_PREFIX + r.id,
-              })),
-          );
+              }));
+          });
         } catch (e) {
           log("codex", `读取 threads 失败，改为扫描 rollout：${(e as Error).message}`, "warn");
         }

@@ -13,6 +13,7 @@ import { discoverSessions, listContextProjects } from "../core/engine.js";
 import { loadRegistry, syncProjects } from "../projects/sync.js";
 import { ActivityTracker, ACTIVE_WINDOW_MS } from "../core/activity.js";
 import { mirrorLatestSession } from "../mirror/index.js";
+import { reconcileMirrorDuplicates } from "../mirror/dedup.js";
 import { isMirrorTarget } from "../mirror/state.js";
 
 export const PID_FILE = path.join(AMUX_HOME, "daemon.pid");
@@ -124,9 +125,8 @@ export async function runDaemon(opts: { quiet?: boolean } = {}): Promise<void> {
         for (const session of sessions) {
           if (session.harness !== "codex" && session.harness !== "antigravity") continue;
           if (isMirrorTarget(session.id) || /\[来自 (Codex|Antigravity)\]/.test(session.title ?? "")) continue;
-          for (const workspace of session.paths) {
-            if (project.roots.some((root) => isWithin(workspace, root))) schedule(workspace, session.harness as "codex" | "antigravity", project.name);
-          }
+          const workspace = session.paths.find((candidate) => project.roots.some((root) => isWithin(candidate, root)));
+          if (workspace) schedule(workspace, session.harness as "codex" | "antigravity", project.name);
         }
       }
       health.lastScanAt = new Date().toISOString();
@@ -194,6 +194,15 @@ export async function runDaemon(opts: { quiet?: boolean } = {}): Promise<void> {
   heartbeat();
   log("daemon", `amux 后台启动 PID ${process.pid}`);
   await refreshProjects();
+  if (stopping) return;
+  try {
+    const cleaned = await reconcileMirrorDuplicates();
+    if (cleaned.antigravityDeleted > 0 || cleaned.codexArchived > 0) {
+      log("mirror", `已清理历史重复会话（Antigravity 删除 ${cleaned.antigravityDeleted} 个，Codex 归档 ${cleaned.codexArchived} 个）`);
+    }
+  } catch (error) {
+    log("mirror", `清理历史重复会话失败：${error instanceof Error ? error.message : String(error)}`, "warn");
+  }
   if (stopping) return;
   scan();
   // Recover failed channels even when their source is older than the active-session window.

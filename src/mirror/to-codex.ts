@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import { CodexAppServerClient } from '../harness/codex/appserver.js';
 import { findCodexProjectId } from './project-resolver.js';
+import { cleanupSupersededCodexTargets } from './dedup.js';
 import { recordMirrorTarget, sessionFingerprint } from './state.js';
 import type { MirrorResult, MirrorSession } from './types.js';
 
@@ -71,18 +72,33 @@ export async function mirrorToCodex(session: MirrorSession): Promise<MirrorResul
 
     const readback = await client.request('thread/read', { threadId, includeTurns: true });
     if (readback.thread?.id !== threadId || !readback.thread.path) throw new Error('Codex 原生会话读回失败');
-    const storedMessages = fs.readFileSync(readback.thread.path, 'utf8').split('\n').filter(Boolean)
-      .map((line) => JSON.parse(line))
-      .filter((entry) => entry.type === 'response_item' && entry.payload?.type === 'message'
-        && ['user', 'assistant'].includes(entry.payload.role))
-      .map((entry) => ({ role: entry.payload.role, text: entry.payload.content.map((part: any) => part.text ?? '').join(''), timestamp: 0 }));
-    const tail = storedMessages.slice(-session.turns.length);
-    if (sessionFingerprint({ ...session, turns: tail }) !== sessionFingerprint(session)) {
+    const fp = sessionFingerprint(session);
+    let matched = false;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const storedMessages = fs.readFileSync(readback.thread.path, 'utf8').split('\n').filter(Boolean)
+        .map((line) => { try { return JSON.parse(line); } catch { return null; } })
+        .filter((entry) => entry?.type === 'response_item' && entry.payload?.type === 'message'
+          && ['user', 'assistant'].includes(entry.payload.role))
+        .map((entry) => ({ role: entry.payload.role, text: entry.payload.content.map((part: any) => part.text ?? '').join(''), timestamp: 0 }));
+      const tail = storedMessages.slice(-session.turns.length);
+      if (tail.length === session.turns.length && sessionFingerprint({ ...session, turns: tail }) === fp) {
+        matched = true;
+        break;
+      }
+      if (attempt < 4) await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    if (!matched) {
       throw new Error('Codex 原生会话磁盘读回内容不匹配');
     }
     recordMirrorTarget(threadId, 'codex', session.sourceSessionId, session.turns.length, {
-      fingerprint: sessionFingerprint(session), nativeReadbackVerifiedAt: Date.now(),
+      fingerprint: fp, nativeReadbackVerifiedAt: Date.now(),
     });
+    await cleanupSupersededCodexTargets(client, session.sourceSessionId, threadId, {
+      workspacePath: session.workspacePath,
+      title: titleWithTag,
+      fingerprint: fp,
+      turnCount: session.turns.length,
+    }).catch(() => {});
 
     return {
       sourceSessionId: session.sourceSessionId,
@@ -94,7 +110,19 @@ export async function mirrorToCodex(session: MirrorSession): Promise<MirrorResul
       workspacePath: session.workspacePath,
     };
   } catch (error) {
-    if (createdThreadId) await client.request('thread/archive', { threadId: createdThreadId }).catch(() => {});
+    if (createdThreadId) {
+      const archived = await client.request('thread/archive', { threadId: createdThreadId }, 5000).then(() => true, () => false);
+      if (!archived) {
+        await client.stop().catch(() => {});
+        const fallback = new CodexAppServerClient();
+        try {
+          await fallback.start();
+          await fallback.request('thread/archive', { threadId: createdThreadId }, 5000);
+        } catch {} finally {
+          await fallback.stop().catch(() => {});
+        }
+      }
+    }
     throw error;
   } finally {
     await client.stop();
