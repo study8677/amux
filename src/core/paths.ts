@@ -78,7 +78,7 @@ export function ensureDir(p: string): void {
 export function resolveWorkspace(opt?: string): string {
   if (opt) return normRoot(opt);
   if (process.env.AMUX_WORKSPACE) return normRoot(process.env.AMUX_WORKSPACE);
-  let dir = normRoot(process.cwd());
+  const dir = normRoot(process.cwd());
   // walk up to find .amux or .git
   let cur = dir;
   while (true) {
@@ -87,5 +87,16 @@ export function resolveWorkspace(opt?: string): string {
     if (parent === cur) break;
     cur = parent;
   }
+  // fallback: match against registered non-git project roots if available
+  try {
+    const regPath = path.join(AMUX_HOME, "registry.json");
+    if (exists(regPath)) {
+      const reg = JSON.parse(fs.readFileSync(regPath, "utf8")) as { projects?: Array<{ roots?: string[] }> };
+      const allRoots = (reg.projects ?? []).flatMap((p) => p.roots ?? []).map(normRoot);
+      allRoots.sort((a, b) => b.length - a.length);
+      const hit = allRoots.find((r) => isWithin(dir, r));
+      if (hit) return hit;
+    }
+  } catch {}
   return dir;
 }

@@ -75,6 +75,8 @@ export async function syncProjects(opts: { apply: boolean; confirmDeletes?: bool
   const byKey = new Map(plan.registry.map((e) => [e.key, e]));
   const origByKey = new Map(reg.projects.map((e) => [e.key, e]));
   const prepared = new Set<string>();
+  const succeededDeleteHarnessesByKey = new Map<string, Set<string>>();
+  const failedDeleteKeys = new Set<string>();
   for (const action of plan.actions) {
     const h = harnesses.find((x) => x.id === action.harness);
     if (!h?.projects) continue;
@@ -99,6 +101,9 @@ export async function syncProjects(opts: { apply: boolean; confirmDeletes?: bool
         log("projects", `${h.displayName} 更新项目「${action.name ?? entry?.name}」${action.roots ? " 根目录 → " + action.roots.join(", ") : ""}`);
       } else {
         await h.projects.delete(action.id);
+        const done = succeededDeleteHarnessesByKey.get(action.key) ?? new Set<string>();
+        done.add(action.harness);
+        succeededDeleteHarnessesByKey.set(action.key, done);
         log("projects", `${h.displayName} 删除项目「${action.name}」（${action.reason}）`, "warn");
       }
       result.applied.push({ action, ok: true });
@@ -106,10 +111,29 @@ export async function syncProjects(opts: { apply: boolean; confirmDeletes?: bool
       const msg = (e as Error).message;
       result.applied.push({ action, ok: false, error: msg });
       log("projects", `${h.displayName} ${action.type} 失败：${msg}`, "error");
-      // roll back the sync base so the next cycle retries instead of reverting the other side
-      const entry = byKey.get(action.key);
-      if (entry) entry.lastSynced = origByKey.get(action.key)?.lastSynced;
+      // roll back the sync base so the next cycle retries instead of reverting or resurrecting the other side
+      if (action.type === "delete") {
+        failedDeleteKeys.add(action.key);
+      } else {
+        const entry = byKey.get(action.key);
+        if (entry) entry.lastSynced = origByKey.get(action.key)?.lastSynced;
+      }
     }
+  }
+  for (const key of failedDeleteKeys) {
+    if (byKey.has(key)) continue;
+    const orig = origByKey.get(key);
+    if (!orig) continue;
+    const restored = structuredClone(orig);
+    const deletedSides = succeededDeleteHarnessesByKey.get(key);
+    if (deletedSides) {
+      for (const hId of deletedSides) {
+        delete restored.ids[hId];
+        if (restored.lastSynced?.ids) delete restored.lastSynced.ids[hId];
+      }
+    }
+    plan.registry.push(restored);
+    byKey.set(key, restored);
   }
   for (const id of prepared) {
     const hint = await harnesses.find((x) => x.id === id)?.projects?.finishWrite?.();

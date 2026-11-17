@@ -4,6 +4,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { ANTIGRAVITY_APP_DATA, AMUX_HOME } from '../core/paths.js';
 import { findAntigravityProjectId } from './project-resolver.js';
+import { formatMirrorTitle } from './cleaner.js';
 import { recordMirrorTarget, sessionFingerprint } from './state.js';
 import { antigravityRequest } from './antigravity-api.js';
 import { prepareNativeImport, validateNativeStorageFormat } from './antigravity-storage.js';
@@ -14,7 +15,7 @@ export async function mirrorToAntigravity(session: MirrorSession): Promise<Mirro
   const requestedId = crypto.randomUUID();
   const projectId = findAntigravityProjectId(session.workspacePath) ?? '';
   const workspaceUri = pathToFileURL(session.workspacePath).href;
-  const title = session.title.includes('[来自 Codex]') ? session.title : `${session.title} [来自 Codex]`;
+  const title = formatMirrorTitle(session.title, '[来自 Codex]');
   const templateId = crypto.randomUUID();
   const directory = path.join(AMUX_HOME, 'imports');
   fs.mkdirSync(directory, { recursive: true });
@@ -55,10 +56,12 @@ export async function mirrorToAntigravity(session: MirrorSession): Promise<Mirro
     const brainDir = path.join(ANTIGRAVITY_APP_DATA, 'brain', id);
     const logsDir = path.join(brainDir, '.system_generated', 'logs');
     fs.mkdirSync(logsDir, { recursive: true });
-    fs.writeFileSync(path.join(logsDir, 'transcript.jsonl'), session.turns.map((turn, index) => JSON.stringify({
+    const transcriptContent = session.turns.map((turn, index) => JSON.stringify({
       step_index: index, type: turn.role === 'user' ? 'USER_INPUT' : 'PLANNER_RESPONSE',
       created_at: new Date(turn.timestamp || Date.now()).toISOString(), content: turn.text,
-    })).join('\n') + '\n');
+    })).join('\n') + '\n';
+    fs.writeFileSync(path.join(logsDir, 'transcript.jsonl'), transcriptContent);
+    fs.writeFileSync(path.join(logsDir, 'transcript_full.jsonl'), transcriptContent);
     const fp = sessionFingerprint(session);
     recordMirrorTarget(id, 'antigravity', session.sourceSessionId, session.turns.length, {
       fingerprint: fp, nativeReadbackVerifiedAt: Date.now(), nativeStorageVersion: 2,

@@ -273,7 +273,11 @@ export function createCodexAdapter(opts: { codexBin?: string } = {}): HarnessAda
 
     watchTargets(): string[] {
       const db = findStateDb();
-      return [...(db ? [db + "-wal", db] : []), ...todayDirs().filter(exists)];
+      const sessionsRoot = path.join(CODEX_HOME, "sessions");
+      return [
+        ...(db ? [db + "-wal", db] : []),
+        ...[CODEX_HOME, sessionsRoot, ...todayDirs()].filter(exists),
+      ];
     },
   };
 }

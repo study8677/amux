@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import Database from 'better-sqlite3';
-import { AMUX_HOME, ANTIGRAVITY_APP_DATA, ANTIGRAVITY_SUMMARIES_DB, normRoot } from '../core/paths.js';
+import { AMUX_HOME, ANTIGRAVITY_APP_DATA, ANTIGRAVITY_SUMMARIES_DB, isWithin, normRoot } from '../core/paths.js';
 import { CodexAppServerClient } from '../harness/codex/appserver.js';
 import { findStateDb } from '../harness/codex/index.js';
 import { antigravityRequest } from './antigravity-api.js';
@@ -141,12 +141,20 @@ export function isCodexSubagentPayload(payload: any): boolean {
 }
 
 /** Check whether workspace_uris JSON/text matches a normalized workspace path */
-export function antigravityWorkspaceMatches(workspaceUrisRaw: string | null | undefined, normWorkspace: string): boolean {
+export function antigravityWorkspaceMatches(
+  workspaceUrisRaw: string | null | undefined,
+  normWorkspace: string,
+  allowSubdirs = false
+): boolean {
   if (!workspaceUrisRaw) return false;
   try {
     const parsed = JSON.parse(workspaceUrisRaw);
     if (Array.isArray(parsed)) {
-      return parsed.some((u) => typeof u === 'string' && normRoot(u) === normWorkspace);
+      return parsed.some((u) => {
+        if (typeof u !== 'string') return false;
+        const candidate = normRoot(u);
+        return allowSubdirs ? isWithin(candidate, normWorkspace) : candidate === normWorkspace;
+      });
     }
   } catch {}
   const encoded = pathToFileURL(normWorkspace).href;
@@ -246,6 +254,10 @@ export function extractCodexStoredState(rolloutPath: string): {
           continue;
         }
         if (pType === 'message' && (entry.payload?.role === 'user' || entry.payload?.role === 'assistant')) {
+          if (entry.payload?.phase === 'commentary') {
+            hasInteractiveActivity = true;
+            continue;
+          }
           const text = Array.isArray(entry.payload.content)
             ? entry.payload.content.map((part: any) => part?.text ?? '').join('')
             : '';
@@ -272,6 +284,104 @@ export function extractCodexStoredState(rolloutPath: string): {
   } catch {
     return null;
   }
+}
+
+/**
+ * Determine synchronously from local files whether a Codex session originally created by amux
+ * now contains genuine user continuation (new prompts, tool executions, or edited turns).
+ */
+export function hasUserContinuedCodexMirror(threadId: string, rolloutPath?: string | null): boolean {
+  const getInfo = stateFn('getMirrorTargetInfo');
+  const info = typeof getInfo === 'function' ? getInfo(threadId) : null;
+  if (info?.preservedUserContinuation) return true;
+  if (!rolloutPath || !fs.existsSync(rolloutPath)) return false;
+
+  const stored = extractCodexStoredState(rolloutPath);
+  if (!stored) return false;
+  if (stored.hasInteractiveActivity) return true;
+  if (info) {
+    if (info.turnCount > 0 && stored.turns.length > info.turnCount) return true;
+    if (info.fingerprint && stored.turns.length === info.turnCount && stored.fingerprint !== info.fingerprint) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Determine synchronously from local files/SQLite whether an Antigravity session originally created
+ * by amux now contains genuine user continuation (explicit user/model steps, tools, or extra steps).
+ */
+export function hasUserContinuedAntigravityMirror(conversationId: string, transcriptPath?: string | null): boolean {
+  const getInfo = stateFn('getMirrorTargetInfo');
+  const info = typeof getInfo === 'function' ? getInfo(conversationId) : null;
+  if (info?.preservedUserContinuation) return true;
+
+  const resolvedTranscript =
+    transcriptPath ??
+    path.join(ANTIGRAVITY_APP_DATA, 'brain', conversationId, '.system_generated', 'logs', 'transcript.jsonl');
+
+  if (resolvedTranscript && fs.existsSync(resolvedTranscript)) {
+    try {
+      const lines = fs
+        .readFileSync(resolvedTranscript, 'utf8')
+        .split('\n')
+        .map((l) => l.trim())
+        .filter(Boolean);
+      if (info && info.turnCount > 0 && lines.length > info.turnCount) return true;
+      for (const line of lines) {
+        try {
+          const step = JSON.parse(line);
+          if (
+            step?.source === 'USER_EXPLICIT' ||
+            step?.source === 'MODEL' ||
+            step?.type === 'GENERIC' ||
+            (typeof step?.content === 'string' && step.content.includes('<USER_REQUEST>'))
+          ) {
+            return true;
+          }
+        } catch {}
+      }
+    } catch {}
+  }
+
+  const convDbPath = path.join(ANTIGRAVITY_APP_DATA, 'conversations', `${conversationId}.db`);
+  if (info && info.turnCount > 0 && fs.existsSync(convDbPath)) {
+    try {
+      const db = new Database(convDbPath, { readonly: true, fileMustExist: true });
+      try {
+        const row = db
+          .prepare(
+            'SELECT COUNT(*) AS count, COALESCE(SUM(CASE WHEN step_type NOT IN (14, 15) THEN 1 ELSE 0 END), 0) AS nonText FROM steps'
+          )
+          .get() as { count: number; nonText: number } | undefined;
+        if (row && (row.count > info.turnCount || row.nonText > 0)) return true;
+      } finally {
+        db.close();
+      }
+    } catch {}
+  }
+
+  return false;
+}
+
+/**
+ * Returns true if a session is an untouched mirror destination (should be skipped to prevent loopback),
+ * or false if it is either a normal session OR a mirror destination where the user continued chatting.
+ */
+export function shouldSkipMirroredSession(
+  harness: 'codex' | 'antigravity',
+  sessionId: string,
+  title?: string | null,
+  filePath?: string | null
+): boolean {
+  const isTargetFn = stateFn('isMirrorTarget');
+  const tracked = typeof isTargetFn === 'function' ? isTargetFn(sessionId) : false;
+  const tagged = /\[来自 (?:Codex|Antigravity)\]/.test(title ?? '');
+  if (!tracked && !tagged) return false;
+  return harness === 'codex'
+    ? !hasUserContinuedCodexMirror(sessionId, filePath)
+    : !hasUserContinuedAntigravityMirror(sessionId, filePath);
 }
 
 async function readAntigravityStoredState(cascadeId: string): Promise<{
@@ -778,49 +888,58 @@ export async function reconcileMirrorDuplicates(): Promise<{ antigravityDeleted:
 
       if (dupBuckets.length > 0) {
         const summaries = await fetchLiveSummaries();
-        const activeTargetIds = new Set(
-          (stateFn('getUnsupersededMirrorTargets')?.() ?? []).map((t) => t.targetSessionId)
-        );
         for (const bucket of dupBuckets) {
-          const byFingerprint = new Map<string, typeof bucket>();
-          for (const row of bucket) {
-            try {
-              const stored = await readAntigravityStoredState(row.conversation_id);
-              if (!stored.exists || stored.hasInteractiveActivity || !stored.fingerprint) continue;
-              const list = byFingerprint.get(stored.fingerprint) ?? [];
-              list.push(row);
-              byFingerprint.set(stored.fingerprint, list);
-            } catch {}
-          }
-          for (const [, identicalRows] of byFingerprint) {
-            if (identicalRows.length < 2) continue;
-            identicalRows.sort((a, b) => {
-              const aTracked = activeTargetIds.has(a.conversation_id) ? 1 : 0;
-              const bTracked = activeTargetIds.has(b.conversation_id) ? 1 : 0;
-              if (bTracked !== aTracked) return bTracked - aTracked;
-              return b.last_modified_time.localeCompare(a.last_modified_time);
-            });
-            for (const dup of identicalRows.slice(1)) {
+          let bucketWs = '';
+          try {
+            const parsed = JSON.parse(bucket[0].workspace_uris);
+            if (Array.isArray(parsed) && typeof parsed[0] === 'string') bucketWs = normRoot(parsed[0]);
+          } catch {}
+          const runBucket = async () => {
+            const activeTargetIds = new Set(
+              (stateFn('getUnsupersededMirrorTargets')?.() ?? []).map((t) => t.targetSessionId)
+            );
+            const byFingerprint = new Map<string, typeof bucket>();
+            for (const row of bucket) {
               try {
-                if (summaries && !summaries[dup.conversation_id] && !existsInAntigravitySummariesDb(dup.conversation_id)) {
-                  continue;
-                }
-                await antigravityRequest('DeleteCascadeTrajectory', { cascadeId: dup.conversation_id });
-                deleteAntigravityMirrorFiles(dup.conversation_id);
-                stateFn('markMirrorTargetSuperseded')?.(dup.conversation_id, {
-                  fallback: { agent: 'antigravity', sourceId: 'reconciled-duplicate', turnCount: 0 },
-                });
-                antigravityDeleted++;
+                const stored = await readAntigravityStoredState(row.conversation_id);
+                if (!stored.exists || stored.hasInteractiveActivity || !stored.fingerprint) continue;
+                const list = byFingerprint.get(stored.fingerprint) ?? [];
+                list.push(row);
+                byFingerprint.set(stored.fingerprint, list);
               } catch {}
             }
-          }
+            for (const [, identicalRows] of byFingerprint) {
+              if (identicalRows.length < 2) continue;
+              identicalRows.sort((a, b) => {
+                const aTracked = activeTargetIds.has(a.conversation_id) ? 1 : 0;
+                const bTracked = activeTargetIds.has(b.conversation_id) ? 1 : 0;
+                if (bTracked !== aTracked) return bTracked - aTracked;
+                return b.last_modified_time.localeCompare(a.last_modified_time);
+              });
+              for (const dup of identicalRows.slice(1)) {
+                try {
+                  if (summaries && !summaries[dup.conversation_id] && !existsInAntigravitySummariesDb(dup.conversation_id)) {
+                    continue;
+                  }
+                  await antigravityRequest('DeleteCascadeTrajectory', { cascadeId: dup.conversation_id });
+                  deleteAntigravityMirrorFiles(dup.conversation_id);
+                  stateFn('markMirrorTargetSuperseded')?.(dup.conversation_id, {
+                    fallback: { agent: 'antigravity', sourceId: 'reconciled-duplicate', turnCount: 0 },
+                  });
+                  antigravityDeleted++;
+                } catch {}
+              }
+            }
+          };
+          if (bucketWs) await withWorkspaceMirrorLock(bucketWs, runBucket).catch(() => {});
+          else await runBucket();
         }
       }
     } catch {}
   }
 
   // --- Codex pass ---
-  let codexUntrackedBuckets: Array<Array<{ id: string; rollout_path: string; updated_at_ms: number }>> = [];
+  let codexUntrackedBuckets: Array<Array<{ id: string; cwd: string; rollout_path: string; updated_at_ms: number }>> = [];
   const stateDbPath = findStateDb();
   if (stateDbPath && fs.existsSync(stateDbPath)) {
     try {
@@ -842,11 +961,12 @@ export async function reconcileMirrorDuplicates(): Promise<{ antigravityDeleted:
           )
           .all() as Array<{ id: string; cwd: string; label: string; rollout_path: string; updated_at_ms: number }>;
 
-        const byCwdAndLabel = new Map<string, Array<{ id: string; rollout_path: string; updated_at_ms: number }>>();
+        const byCwdAndLabel = new Map<string, Array<{ id: string; cwd: string; rollout_path: string; updated_at_ms: number }>>();
         for (const row of rows) {
-          const k = `${normRoot(row.cwd)}::${row.label}`;
+          const normCwd = normRoot(row.cwd);
+          const k = `${normCwd}::${row.label}`;
           const list = byCwdAndLabel.get(k) ?? [];
-          list.push({ id: row.id, rollout_path: row.rollout_path, updated_at_ms: row.updated_at_ms });
+          list.push({ id: row.id, cwd: normCwd, rollout_path: row.rollout_path, updated_at_ms: row.updated_at_ms });
           byCwdAndLabel.set(k, list);
         }
         codexUntrackedBuckets = [...byCwdAndLabel.values()].filter((list) => list.length >= 2);
@@ -896,38 +1016,43 @@ export async function reconcileMirrorDuplicates(): Promise<{ antigravityDeleted:
       }
 
       if (codexUntrackedBuckets.length > 0) {
-        const activeTargetIds = new Set(
-          (stateFn('getUnsupersededMirrorTargets')?.() ?? []).map((t) => t.targetSessionId)
-        );
         for (const bucket of codexUntrackedBuckets) {
-          const byFingerprint = new Map<string, typeof bucket>();
-          for (const row of bucket) {
-            const stored = extractCodexStoredState(row.rollout_path);
-            if (!stored || stored.hasInteractiveActivity || !stored.fingerprint) continue;
-            const list = byFingerprint.get(stored.fingerprint) ?? [];
-            list.push(row);
-            byFingerprint.set(stored.fingerprint, list);
-          }
-          for (const [, identicalRows] of byFingerprint) {
-            if (identicalRows.length < 2) continue;
-            identicalRows.sort((a, b) => {
-              const aTracked = activeTargetIds.has(a.id) ? 1 : 0;
-              const bTracked = activeTargetIds.has(b.id) ? 1 : 0;
-              if (bTracked !== aTracked) return bTracked - aTracked;
-              return b.updated_at_ms - a.updated_at_ms;
-            });
-            for (const dup of identicalRows.slice(1)) {
-              try {
-                if (!codexKeeperExists(dup.id)) continue;
-                const c = await ensureClient();
-                await c.request('thread/archive', { threadId: dup.id });
-                stateFn('markMirrorTargetSuperseded')?.(dup.id, {
-                  fallback: { agent: 'codex', sourceId: 'reconciled-duplicate', turnCount: 0 },
-                });
-                codexArchived++;
-              } catch {}
+          const bucketWs = bucket[0]?.cwd ?? '';
+          const runBucket = async () => {
+            const activeTargetIds = new Set(
+              (stateFn('getUnsupersededMirrorTargets')?.() ?? []).map((t) => t.targetSessionId)
+            );
+            const byFingerprint = new Map<string, typeof bucket>();
+            for (const row of bucket) {
+              const stored = extractCodexStoredState(row.rollout_path);
+              if (!stored || stored.hasInteractiveActivity || !stored.fingerprint) continue;
+              const list = byFingerprint.get(stored.fingerprint) ?? [];
+              list.push(row);
+              byFingerprint.set(stored.fingerprint, list);
             }
-          }
+            for (const [, identicalRows] of byFingerprint) {
+              if (identicalRows.length < 2) continue;
+              identicalRows.sort((a, b) => {
+                const aTracked = activeTargetIds.has(a.id) ? 1 : 0;
+                const bTracked = activeTargetIds.has(b.id) ? 1 : 0;
+                if (bTracked !== aTracked) return bTracked - aTracked;
+                return b.updated_at_ms - a.updated_at_ms;
+              });
+              for (const dup of identicalRows.slice(1)) {
+                try {
+                  if (!codexKeeperExists(dup.id)) continue;
+                  const c = await ensureClient();
+                  await c.request('thread/archive', { threadId: dup.id });
+                  stateFn('markMirrorTargetSuperseded')?.(dup.id, {
+                    fallback: { agent: 'codex', sourceId: 'reconciled-duplicate', turnCount: 0 },
+                  });
+                  codexArchived++;
+                } catch {}
+              }
+            }
+          };
+          if (bucketWs) await withWorkspaceMirrorLock(bucketWs, runBucket).catch(() => {});
+          else await runBucket();
         }
       }
     } finally {

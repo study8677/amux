@@ -6,7 +6,7 @@
 
 [![GitHub Stars](https://img.shields.io/github/stars/study8677/amux?style=for-the-badge&logo=github&color=gold)](https://github.com/study8677/amux/stargazers)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge)](https://opensource.org/licenses/MIT)
-[![Node.js Version](https://img.shields.io/badge/node-%3E%3D20-brightgreen.svg?style=for-the-badge&logo=node.js)](https://nodejs.org)
+[![Node.js Version](https://img.shields.io/badge/node-%3E%3D22-brightgreen.svg?style=for-the-badge&logo=node.js)](https://nodejs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.0+-blue.svg?style=for-the-badge&logo=typescript)](https://www.typescriptlang.org/)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-orange.svg?style=for-the-badge)](https://github.com/study8677/amux/pulls)
 
@@ -39,7 +39,7 @@
 ### 🗂 2. 全局项目双向自动对齐
 - 自动发现 Codex 和 Antigravity 在当前电脑上的全部项目；
 - 支持项目新建、改名、删除双向同步；
-- 内置写前自动快照备份与**“单次删除超过 30% 自动熔断暂停”**的安全防护网。
+- 内置写前自动快照备份与**“单次删除超过安全阈值（默认 2 个）自动熔断暂停”**的安全防护网。
 
 ### ⚡ 3. 零感知后台守护进程
 - 内存常驻 < 40MB，近乎零 CPU 占用；
@@ -167,7 +167,7 @@ amux dashboard            # 单独启动本机运行状态页
 
 1. **零破坏写入**：写 Codex 会话一律走其原生内置的 `codex app-server` RPC 通道，杜绝在应用运行时直接修改主 SQLite 数据库导致的文件损坏或死锁。
 2. **写前自动快照**：任何涉及项目配置变更的操作，均在 `~/.amux/backups/` 保留带时间戳的完整备份。
-3. **批量删除熔断保护**：当自动检测到单次删除项目超过 30% 时，强制暂停并等待人工 `--yes` 确认。
+3. **批量删除熔断保护**：当自动检测到单次删除项目超过安全阈值（默认 2 个）时，强制暂停并要求人工显式传入 `--yes --force-delete` 确认。
 
 ---
 

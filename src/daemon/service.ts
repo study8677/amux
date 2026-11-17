@@ -15,10 +15,13 @@ export function prepareServiceRuntime(cliPath: string): string {
   const source = path.dirname(fs.realpathSync(cliPath));
   const dependency = path.dirname(createRequire(import.meta.url).resolve("better-sqlite3/package.json"));
   const hash = createHash("sha256");
+  hash.update(process.versions.modules ?? process.version);
   for (const file of fs.readdirSync(source).filter((name) => name.endsWith(".js")).sort()) {
     hash.update(file).update(fs.readFileSync(path.join(source, file)));
   }
   hash.update(fs.readFileSync(path.join(dependency, "package.json")));
+  const nativeAddon = path.join(dependency, "build", "Release", "better_sqlite3.node");
+  if (fs.existsSync(nativeAddon)) hash.update(fs.readFileSync(nativeAddon));
   const runtime = path.join(AMUX_HOME, "runtime", hash.digest("hex").slice(0, 16));
   const destination = path.join(runtime, "dist", path.basename(cliPath));
   if (fs.existsSync(path.join(runtime, "ready"))) return destination;

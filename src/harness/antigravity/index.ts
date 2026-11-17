@@ -25,15 +25,21 @@ function parseAgyTime(s: string): number {
   return isNaN(t) ? 0 : t;
 }
 
+interface AgyProjectResource {
+  folderUri?: string;
+  gitFolder?: { folderUri?: string; [k: string]: unknown };
+  workspaceRoot?: { folderUri?: string; [k: string]: unknown };
+}
+
 interface AgyProjectFile {
   id: string;
   name: string;
-  projectResources?: { resources?: Array<{ folderUri?: string; gitFolder?: { folderUri?: string; [k: string]: unknown } }> };
+  projectResources?: { resources?: AgyProjectResource[] };
   [k: string]: unknown;
 }
 
-function resourceUri(r: { folderUri?: string; gitFolder?: { folderUri?: string } }): string | undefined {
-  return r.gitFolder?.folderUri ?? r.folderUri;
+function resourceUri(r: AgyProjectResource): string | undefined {
+  return r.gitFolder?.folderUri ?? r.folderUri ?? r.workspaceRoot?.folderUri;
 }
 
 function toResource(root: string): Record<string, unknown> {
@@ -54,7 +60,28 @@ class AgyProjectStore implements ProjectStore {
     for (const f of fs.readdirSync(AGY_PROJECTS_DIR)) {
       if (!f.endsWith(".json")) continue;
       const fp = path.join(AGY_PROJECTS_DIR, f);
-      const d = readJson<AgyProjectFile | null>(fp, null);
+      let d: AgyProjectFile | null = null;
+      let lastErr: unknown;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const raw = fs.readFileSync(fp, "utf8");
+          d = JSON.parse(raw) as AgyProjectFile;
+          if (d && typeof d.id === "string" && d.id.length > 0) break;
+          d = null;
+          lastErr = new Error(`invalid project file ${f}: missing id`);
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+            d = null;
+            lastErr = null;
+            break;
+          }
+          lastErr = err;
+        }
+        if (attempt === 0) await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      if (lastErr && !d) {
+        throw new Error(`读取 Antigravity 项目配置 ${f} 失败: ${(lastErr as Error).message}`);
+      }
       if (!d?.id) continue;
       const roots = (d.projectResources?.resources ?? []).map(resourceUri).filter((u): u is string => !!u).map(normRoot);
       out.push({ harness: "antigravity", id: d.id, name: d.name ?? d.id, roots, updatedAt: fs.statSync(fp).mtimeMs });
@@ -128,10 +155,15 @@ export function createAntigravityAdapter(): HarnessAdapter {
       const db = SUMMARIES_DB();
       if (!exists(db)) return [];
       try {
-        return withDb(db, (d) =>
-          d
-            .all<{ conversation_id: string; title: string; workspace_uris: string; last_modified_time: string; parent_conversation_id: string }>(
-              `SELECT conversation_id, title, workspace_uris, last_modified_time, parent_conversation_id FROM conversation_summaries`,
+        return withDb(db, (d) => {
+          const cols = new Set(d.all<{ name: string }>("PRAGMA table_info(conversation_summaries)").map((c) => c.name));
+          const subClauses: string[] = [];
+          if (cols.has("parent_conversation_id")) subClauses.push("(parent_conversation_id IS NULL OR parent_conversation_id = '')");
+          if (cols.has("nesting_depth")) subClauses.push("(nesting_depth IS NULL OR nesting_depth = 0)");
+          const whereSql = subClauses.length ? `WHERE ${subClauses.join(" AND ")}` : "";
+          return d
+            .all<{ conversation_id: string; title: string; workspace_uris: string; last_modified_time: string }>(
+              `SELECT conversation_id, title, workspace_uris, last_modified_time FROM conversation_summaries ${whereSql}`,
             )
             .map((r) => {
               let uris: string[] = [];
@@ -141,18 +173,16 @@ export function createAntigravityAdapter(): HarnessAdapter {
                 uris = [];
               }
               return {
-                harness: "antigravity",
+                harness: "antigravity" as const,
                 id: r.conversation_id,
                 title: r.title,
                 paths: uris.map(normRoot),
                 updatedAt: parseAgyTime(r.last_modified_time),
                 file: transcriptPath(r.conversation_id),
-                parent: r.parent_conversation_id,
               };
             })
-            .filter((s) => !s.parent && s.updatedAt > sinceMs && s.paths.length > 0 && exists(s.file))
-            .map(({ parent: _p, ...s }) => s as SessionRef),
-        );
+            .filter((s) => s.updatedAt > sinceMs && s.paths.length > 0 && exists(s.file));
+        });
       } catch (e) {
         log("antigravity", `读取 conversation_summaries 失败：${(e as Error).message}`, "warn");
         return [];

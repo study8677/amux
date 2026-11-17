@@ -2,31 +2,50 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import Database from 'better-sqlite3';
-import { ANTIGRAVITY_APP_DATA, ANTIGRAVITY_SUMMARIES_DB, normRoot } from '../core/paths.js';
+import { ANTIGRAVITY_APP_DATA, ANTIGRAVITY_SUMMARIES_DB, isWithin, normRoot } from '../core/paths.js';
 import { CodexAppServerClient } from '../harness/codex/appserver.js';
+import * as codexHarness from '../harness/codex/index.js';
 import { findStateDb } from '../harness/codex/index.js';
+import { formatMirrorTitle } from './cleaner.js';
 import * as mirrorState from './state.js';
-import { getLastSync, isMirrorTarget, sessionFingerprint } from './state.js';
+import { getLastSync, sessionFingerprint } from './state.js';
 import {
   antigravityWorkspaceMatches,
   cleanupSupersededAntigravityTargets,
   cleanupSupersededCodexTargets,
   codexUserThreadPredicates,
   reconcileMirrorDuplicates,
+  shouldSkipMirroredSession,
   withWorkspaceMirrorLock,
 } from './dedup.js';
 import { extractAntigravitySession } from './extract-antigravity.js';
 import { extractCodexSession } from './extract-codex.js';
 import { mirrorToAntigravity } from './to-antigravity.js';
 import { mirrorToCodex } from './to-codex.js';
-import type { MirrorResult } from './types.js';
+import type { MirrorResult, MirrorSession } from './types.js';
 
 export { reconcileMirrorDuplicates };
+
+export class EmptyMirrorSessionError extends Error {
+  readonly code = 'AMUX_EMPTY_SESSION';
+  constructor(message: string) {
+    super(message);
+    this.name = 'EmptyMirrorSessionError';
+  }
+}
+
+export function isBenignEmptyMirrorError(error: unknown): boolean {
+  if (error instanceof EmptyMirrorSessionError) return true;
+  if (error && typeof error === 'object' && (error as { code?: string }).code === 'AMUX_EMPTY_SESSION') return true;
+  const msg = error instanceof Error ? error.message : String(error ?? '');
+  return /没有可提取的有效对话(?:内容|轮次)|既未找到 Codex 会话，也未找到 Antigravity 会话|未找到 (?:Codex|Antigravity) 在工作区 .* 的活跃会话/.test(msg);
+}
 
 export interface MirrorOptions {
   workspacePath: string;
   source?: 'codex' | 'antigravity';
   target?: 'codex' | 'antigravity';
+  sourceSessionId?: string;
 }
 
 interface LatestAgentSession {
@@ -35,6 +54,7 @@ interface LatestAgentSession {
   title: string;
   updatedAtMs: number;
   filePath: string;
+  workspacePath: string;
 }
 
 function parseAgyTimestampMs(raw: string): number {
@@ -43,12 +63,38 @@ function parseAgyTimestampMs(raw: string): number {
   return Number.isNaN(parsed) ? new Date(raw).getTime() || 0 : parsed;
 }
 
+function safeFileMtimeMs(filePath: string): number {
+  if (!filePath) return 0;
+  try {
+    return fs.statSync(filePath).mtimeMs || 0;
+  } catch {
+    return 0;
+  }
+}
+
+function escapeSqlLike(value: string): string {
+  return value.replace(/[\\%_]/g, '\\$&');
+}
+
+function findHistoryDbSafe(): string | null {
+  if ('findHistoryDb' in codexHarness && typeof codexHarness.findHistoryDb === 'function') {
+    return codexHarness.findHistoryDb();
+  }
+  return null;
+}
+
 /**
- * Finds the latest user session for the given workspace in Codex (excluding subagents & mirror targets).
+ * Finds candidate user sessions for the given workspace in Codex
+ * (excluding subagents and untouched mirror targets, while allowing user-continued mirror sessions
+ * and falling back to thread_history_*.sqlite when rollout files were pruned).
  */
-function findLatestCodexSession(workspacePath: string, altWorkspacePath?: string): LatestAgentSession | null {
+function findCodexCandidates(
+  workspacePath: string,
+  altWorkspacePath?: string,
+  preferredSessionId?: string
+): LatestAgentSession[] {
   const stateDbPath = findStateDb();
-  if (!stateDbPath || !fs.existsSync(stateDbPath)) return null;
+  if (!stateDbPath || !fs.existsSync(stateDbPath)) return [];
 
   try {
     const db = new Database(stateDbPath, { readonly: true, fileMustExist: true });
@@ -59,55 +105,93 @@ function findLatestCodexSession(workspacePath: string, altWorkspacePath?: string
         ? [workspacePath, altWorkspacePath]
         : [workspacePath];
       const cwdPlaceholders = cwds.map(() => '?').join(', ');
+      const subdirPatterns = cwds.map((c) => `${escapeSqlLike(c)}${path.sep}%`);
+      const subdirClauses = subdirPatterns.map(() => "cwd LIKE ? ESCAPE '\\'").join(' OR ');
 
       const hasName = cols.includes('name');
-      const labelExpr = hasName ? "COALESCE(NULLIF(name, ''), NULLIF(title, ''), '')" : "COALESCE(title, '')";
+      const hasUpdatedAtMs = cols.includes('updated_at_ms');
+      const hasCreatedAtMs = cols.includes('created_at_ms');
+      const updatedSelect = hasUpdatedAtMs ? 'updated_at_ms' : 'NULL AS updated_at_ms';
+      const createdSelect = hasCreatedAtMs ? 'created_at_ms' : '0 AS created_at_ms';
+      const orderExpr = hasUpdatedAtMs
+        ? `COALESCE(updated_at_ms, ${hasCreatedAtMs ? 'created_at_ms * 1000' : '0'})`
+        : cols.includes('updated_at')
+          ? 'COALESCE(updated_at * 1000, 0)'
+          : '0';
 
       const rows = db
         .prepare(
-          `SELECT id, title, ${hasName ? 'name' : 'NULL AS name'}, rollout_path, updated_at_ms, created_at_ms
+          `SELECT id, cwd, title, ${hasName ? 'name' : 'NULL AS name'}, rollout_path, ${updatedSelect}, ${createdSelect}
            FROM threads
-           WHERE cwd IN (${cwdPlaceholders})
+           WHERE (cwd IN (${cwdPlaceholders}) OR ${subdirClauses})
              AND ${userPredicates}
-             AND ${labelExpr} NOT LIKE '%[来自 Antigravity]%'
-           ORDER BY COALESCE(updated_at_ms, created_at_ms * 1000) DESC
-           LIMIT 20`
+           ORDER BY ${orderExpr} DESC
+           LIMIT 30`
         )
-        .all(...cwds) as Array<{
+        .all(...cwds, ...subdirPatterns) as Array<{
           id: string;
+          cwd: string;
           title: string;
           name: string | null;
           rollout_path: string;
-          updated_at_ms: number;
-          created_at_ms: number;
+          updated_at_ms: number | null;
+          created_at_ms: number | null;
         }>;
 
-      for (const row of rows) {
-        if (isMirrorTarget(row.id)) continue;
-        if (!row.rollout_path || !fs.existsSync(row.rollout_path)) continue;
+      const historyDbPath = findHistoryDbSafe();
+      const hasHistoryDb = Boolean(historyDbPath && fs.existsSync(historyDbPath));
+      const candidates: LatestAgentSession[] = [];
 
-        return {
+      for (const row of rows) {
+        const rowNormCwd = normRoot(row.cwd || workspacePath);
+        if (!isWithin(rowNormCwd, workspacePath) && (!altWorkspacePath || !isWithin(row.cwd, altWorkspacePath))) {
+          continue;
+        }
+        const label = row.name || row.title || '';
+        const hasRollout = Boolean(row.rollout_path && fs.existsSync(row.rollout_path));
+        if (shouldSkipMirroredSession('codex', row.id, label, hasRollout ? row.rollout_path : null)) {
+          continue;
+        }
+        if (!hasRollout && !hasHistoryDb) continue;
+
+        const dbTs = row.updated_at_ms || (row.created_at_ms ?? 0) * 1000;
+        const mtime = hasRollout ? safeFileMtimeMs(row.rollout_path) : 0;
+
+        candidates.push({
           agent: 'codex',
           id: row.id,
-          title: row.name || row.title || 'Codex Session',
-          updatedAtMs: row.updated_at_ms || row.created_at_ms * 1000,
-          filePath: row.rollout_path,
-        };
+          title: label || 'Codex Session',
+          updatedAtMs: Math.max(dbTs, mtime),
+          filePath: hasRollout ? row.rollout_path : '',
+          workspacePath: rowNormCwd,
+        });
       }
-      return null;
+
+      candidates.sort((a, b) => {
+        if (preferredSessionId) {
+          if (a.id === preferredSessionId && b.id !== preferredSessionId) return -1;
+          if (b.id === preferredSessionId && a.id !== preferredSessionId) return 1;
+        }
+        return b.updatedAtMs - a.updatedAtMs;
+      });
+      return candidates;
     } finally {
       db.close();
     }
   } catch {
-    return null;
+    return [];
   }
 }
 
 /**
- * Finds the latest user session for the given workspace in Antigravity (excluding subagents & mirror targets).
+ * Finds candidate user sessions for the given workspace in Antigravity
+ * (excluding subagents and untouched mirror targets, while allowing user-continued mirror sessions).
  */
-function findLatestAntigravitySession(workspacePath: string): LatestAgentSession | null {
-  if (!fs.existsSync(ANTIGRAVITY_SUMMARIES_DB)) return null;
+function findAntigravityCandidates(
+  workspacePath: string,
+  preferredSessionId?: string
+): LatestAgentSession[] {
+  if (!fs.existsSync(ANTIGRAVITY_SUMMARIES_DB)) return [];
   const normWs = normRoot(workspacePath);
   const encodedUri = pathToFileURL(normWs).href;
 
@@ -132,21 +216,21 @@ function findLatestAntigravitySession(workspacePath: string): LatestAgentSession
           `SELECT conversation_id, title, last_modified_time${hasWorkspaceUris ? ', workspace_uris' : ''}
            FROM conversation_summaries
            WHERE (workspace_uris LIKE ? OR workspace_uris LIKE ?)
-             AND title NOT LIKE '%[来自 Codex]%'
              ${extraWhere}
            ORDER BY last_modified_time DESC
            LIMIT 30`
         )
-        .all(`%${encodedUri}%`, `%"file://${workspacePath}"%`) as Array<{
+        .all(`%${encodedUri}%`, `%file://${workspacePath}%`) as Array<{
           conversation_id: string;
           title: string;
           last_modified_time: string;
           workspace_uris?: string;
         }>;
 
+      const candidates: LatestAgentSession[] = [];
+
       for (const row of rows) {
-        if (row.workspace_uris && !antigravityWorkspaceMatches(row.workspace_uris, normWs)) continue;
-        if (isMirrorTarget(row.conversation_id)) continue;
+        if (row.workspace_uris && !antigravityWorkspaceMatches(row.workspace_uris, normWs, true)) continue;
 
         const transcriptPath = path.join(
           ANTIGRAVITY_APP_DATA,
@@ -158,22 +242,85 @@ function findLatestAntigravitySession(workspacePath: string): LatestAgentSession
         );
 
         if (!fs.existsSync(transcriptPath)) continue;
+        if (shouldSkipMirroredSession('antigravity', row.conversation_id, row.title, transcriptPath)) continue;
 
-        return {
+        let matchedWs = normWs;
+        if (row.workspace_uris) {
+          try {
+            const parsed = JSON.parse(row.workspace_uris);
+            if (Array.isArray(parsed)) {
+              const hit = parsed
+                .filter((u): u is string => typeof u === 'string')
+                .map(normRoot)
+                .find((u) => isWithin(u, normWs));
+              if (hit) matchedWs = hit;
+            }
+          } catch {}
+        }
+
+        const dbTs = parseAgyTimestampMs(row.last_modified_time);
+        const mtime = safeFileMtimeMs(transcriptPath);
+
+        candidates.push({
           agent: 'antigravity',
           id: row.conversation_id,
           title: row.title || 'Antigravity Session',
-          updatedAtMs: parseAgyTimestampMs(row.last_modified_time),
+          updatedAtMs: Math.max(dbTs, mtime),
           filePath: transcriptPath,
-        };
+          workspacePath: matchedWs,
+        });
       }
-      return null;
+
+      candidates.sort((a, b) => {
+        if (preferredSessionId) {
+          if (a.id === preferredSessionId && b.id !== preferredSessionId) return -1;
+          if (b.id === preferredSessionId && a.id !== preferredSessionId) return 1;
+        }
+        return b.updatedAtMs - a.updatedAtMs;
+      });
+      return candidates;
     } finally {
       db.close();
     }
   } catch {
-    return null;
+    return [];
   }
+}
+
+async function resolveFirstNonEmptyCodex(
+  candidates: LatestAgentSession[],
+  fallbackWorkspace: string
+): Promise<{ meta: LatestAgentSession; session: MirrorSession } | null> {
+  for (const cand of candidates) {
+    const session = await extractCodexSession(
+      cand.filePath,
+      cand.id,
+      cand.workspacePath || fallbackWorkspace,
+      cand.title
+    );
+    if (session && session.turns.length > 0) {
+      return { meta: cand, session };
+    }
+  }
+  return null;
+}
+
+async function resolveFirstNonEmptyAntigravity(
+  candidates: LatestAgentSession[],
+  fallbackWorkspace: string
+): Promise<{ meta: LatestAgentSession; session: MirrorSession } | null> {
+  for (const cand of candidates) {
+    const session = await extractAntigravitySession(
+      cand.filePath,
+      cand.id,
+      cand.workspacePath || fallbackWorkspace,
+      cand.title
+    );
+    if (session && session.turns.length > 0) {
+      return { meta: cand, session };
+    }
+  }
+  return null;
 }
 
 /**
@@ -187,21 +334,37 @@ export async function mirrorLatestSession(options: MirrorOptions): Promise<Mirro
     let source = options.source;
     let target = options.target;
 
-    const codexLatest = findLatestCodexSession(canonicalWorkspace, resolvedWorkspace);
-    const antigravityLatest = findLatestAntigravitySession(canonicalWorkspace);
+    const codexCandidates =
+      !source || source === 'codex'
+        ? findCodexCandidates(canonicalWorkspace, resolvedWorkspace, options.sourceSessionId)
+        : [];
+    const antigravityCandidates =
+      !source || source === 'antigravity'
+        ? findAntigravityCandidates(canonicalWorkspace, options.sourceSessionId)
+        : [];
+
+    let resolvedCodex: { meta: LatestAgentSession; session: MirrorSession } | null = null;
+    let resolvedAntigravity: { meta: LatestAgentSession; session: MirrorSession } | null = null;
 
     if (!source) {
-      if (!codexLatest && !antigravityLatest) {
-        throw new Error(`当前工作区 ${resolvedWorkspace} 下既未找到 Codex 会话，也未找到 Antigravity 会话。`);
+      if (codexCandidates.length === 0 && antigravityCandidates.length === 0) {
+        throw new EmptyMirrorSessionError(
+          `当前工作区 ${resolvedWorkspace} 下既未找到 Codex 会话，也未找到 Antigravity 会话。`
+        );
+      }
+      resolvedCodex = await resolveFirstNonEmptyCodex(codexCandidates, resolvedWorkspace);
+      resolvedAntigravity = await resolveFirstNonEmptyAntigravity(antigravityCandidates, resolvedWorkspace);
+
+      if (!resolvedCodex && !resolvedAntigravity) {
+        throw new EmptyMirrorSessionError(`当前工作区 ${resolvedWorkspace} 的会话中暂无可提取的有效对话内容`);
       }
 
-      if (codexLatest && !antigravityLatest) {
+      if (resolvedCodex && !resolvedAntigravity) {
         source = 'codex';
-      } else if (!codexLatest && antigravityLatest) {
+      } else if (!resolvedCodex && resolvedAntigravity) {
         source = 'antigravity';
       } else {
-        // Both exist: pick the more recent one
-        source = codexLatest!.updatedAtMs >= antigravityLatest!.updatedAtMs ? 'codex' : 'antigravity';
+        source = resolvedCodex!.meta.updatedAtMs >= resolvedAntigravity!.meta.updatedAtMs ? 'codex' : 'antigravity';
       }
     }
 
@@ -214,21 +377,17 @@ export async function mirrorLatestSession(options: MirrorOptions): Promise<Mirro
     }
 
     if (source === 'antigravity' && target === 'codex') {
-      if (!antigravityLatest) {
-        throw new Error(`未找到 Antigravity 在工作区 ${resolvedWorkspace} 的活跃会话`);
+      if (antigravityCandidates.length === 0) {
+        throw new EmptyMirrorSessionError(`未找到 Antigravity 在工作区 ${resolvedWorkspace} 的活跃会话`);
       }
 
-      const session = await extractAntigravitySession(
-        antigravityLatest.filePath,
-        antigravityLatest.id,
-        resolvedWorkspace,
-        antigravityLatest.title
-      );
-
-      if (!session || session.turns.length === 0) {
-        throw new Error(`Antigravity 会话中没有可提取的有效对话内容`);
+      const resolved =
+        resolvedAntigravity ?? (await resolveFirstNonEmptyAntigravity(antigravityCandidates, resolvedWorkspace));
+      if (!resolved) {
+        throw new EmptyMirrorSessionError(`Antigravity 会话中没有可提取的有效对话内容`);
       }
 
+      const { meta: antigravityLatest, session } = resolved;
       const fp = sessionFingerprint(session);
       const lastSync = getLastSync(antigravityLatest.id);
       if (lastSync && lastSync.targetAgent === 'codex' && lastSync.fingerprint === fp) {
@@ -240,11 +399,9 @@ export async function mirrorLatestSession(options: MirrorOptions): Promise<Mirro
           const client = new CodexAppServerClient();
           try {
             await client.start();
-            const titleWithTag = session.title.includes('[来自 Antigravity]')
-              ? session.title
-              : `${session.title} [来自 Antigravity]`;
+            const titleWithTag = formatMirrorTitle(session.title, '[来自 Antigravity]');
             await cleanupSupersededCodexTargets(client, antigravityLatest.id, lastSync.targetSessionId, {
-              workspacePath: resolvedWorkspace,
+              workspacePath: session.workspacePath,
               title: titleWithTag,
               fingerprint: fp,
               turnCount: session.turns.length,
@@ -258,7 +415,7 @@ export async function mirrorLatestSession(options: MirrorOptions): Promise<Mirro
           targetSessionId: lastSync.targetSessionId,
           title: session.title,
           turnCount: session.turns.length,
-          workspacePath: resolvedWorkspace,
+          workspacePath: session.workspacePath,
           skipped: true,
           sourceSessionId: session.sourceSessionId,
         };
@@ -267,21 +424,16 @@ export async function mirrorLatestSession(options: MirrorOptions): Promise<Mirro
       return await mirrorToCodex(session);
     } else {
       // source === 'codex' && target === 'antigravity'
-      if (!codexLatest) {
-        throw new Error(`未找到 Codex 在工作区 ${resolvedWorkspace} 的活跃会话`);
+      if (codexCandidates.length === 0) {
+        throw new EmptyMirrorSessionError(`未找到 Codex 在工作区 ${resolvedWorkspace} 的活跃会话`);
       }
 
-      const session = await extractCodexSession(
-        codexLatest.filePath,
-        codexLatest.id,
-        resolvedWorkspace,
-        codexLatest.title
-      );
-
-      if (!session || session.turns.length === 0) {
-        throw new Error(`Codex 会话中没有可提取的有效对话内容`);
+      const resolved = resolvedCodex ?? (await resolveFirstNonEmptyCodex(codexCandidates, resolvedWorkspace));
+      if (!resolved) {
+        throw new EmptyMirrorSessionError(`Codex 会话中没有可提取的有效对话内容`);
       }
 
+      const { meta: codexLatest, session } = resolved;
       const fp = sessionFingerprint(session);
       const lastSync = getLastSync(codexLatest.id);
       if (
@@ -297,11 +449,9 @@ export async function mirrorLatestSession(options: MirrorOptions): Promise<Mirro
             ? mirrorState.getPriorMirrorTargets(codexLatest.id, 'antigravity', lastSync.targetSessionId)
             : [];
         if (prior.length > 0) {
-          const titleWithTag = session.title.includes('[来自 Codex]')
-            ? session.title
-            : `${session.title} [来自 Codex]`;
+          const titleWithTag = formatMirrorTitle(session.title, '[来自 Codex]');
           await cleanupSupersededAntigravityTargets(codexLatest.id, lastSync.targetSessionId, {
-            workspacePath: resolvedWorkspace,
+            workspacePath: session.workspacePath,
             title: titleWithTag,
             fingerprint: fp,
             turnCount: session.turns.length,
@@ -312,7 +462,7 @@ export async function mirrorLatestSession(options: MirrorOptions): Promise<Mirro
           targetSessionId: lastSync.targetSessionId,
           title: session.title,
           turnCount: session.turns.length,
-          workspacePath: resolvedWorkspace,
+          workspacePath: session.workspacePath,
           skipped: true,
           sourceSessionId: session.sourceSessionId,
         };

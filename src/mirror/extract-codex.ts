@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import readline from 'node:readline';
 import Database from 'better-sqlite3';
 import { findHistoryDb } from '../harness/codex/index.js';
-import { cleanCodexUserInput, cleanAssistantOutput, normalizeTurns } from './cleaner.js';
+import { cleanCodexUserInput, cleanAssistantOutput, formatMirrorTitle, normalizeTurns } from './cleaner.js';
 import type { CleanTurn, MirrorSession } from './types.js';
 
 interface RawCodexItem {
@@ -11,6 +11,7 @@ interface RawCodexItem {
   payload?: {
     type?: string;
     role?: string;
+    phase?: string;
     content?: Array<{
       type?: string;
       text?: string;
@@ -30,7 +31,7 @@ export async function extractCodexSession(
   const rawTurns: CleanTurn[] = [];
   let firstUserPrompt = '';
 
-  if (fs.existsSync(rolloutPath)) {
+  if (rolloutPath && fs.existsSync(rolloutPath)) {
     const fileStream = fs.createReadStream(rolloutPath, { encoding: 'utf-8' });
     const rl = readline.createInterface({
       input: fileStream,
@@ -41,14 +42,15 @@ export async function extractCodexSession(
       if (!line.trim()) continue;
       try {
         const item: RawCodexItem = JSON.parse(line);
-        const timestamp = item.timestamp ? new Date(item.timestamp).getTime() : Date.now();
+        if (item.type && item.type !== 'response_item') continue;
+        const timestamp = item.timestamp ? new Date(item.timestamp).getTime() || Date.now() : Date.now();
         const payload = item.payload;
 
         if (!payload) continue;
 
         if (payload.role === 'user' && payload.content) {
           for (const c of payload.content) {
-            if (c.type === 'input_text' && c.text) {
+            if ((c.type === 'input_text' || c.type === 'text') && c.text) {
               const cleaned = cleanCodexUserInput(c.text);
               if (cleaned) {
                 if (!firstUserPrompt) {
@@ -63,8 +65,10 @@ export async function extractCodexSession(
             }
           }
         } else if (payload.role === 'assistant' && payload.content) {
+          // Skip intermediate tool-status commentary emitted before final_answer
+          if (payload.phase === 'commentary') continue;
           for (const c of payload.content) {
-            if (c.type === 'output_text' && c.text) {
+            if ((c.type === 'output_text' || c.type === 'text') && c.text) {
               const cleaned = cleanAssistantOutput(c.text);
               if (cleaned) {
                 rawTurns.push({
@@ -81,7 +85,7 @@ export async function extractCodexSession(
       }
     }
   } else {
-    // Fallback: extract from thread_history_*.sqlite
+    // Fallback: extract from thread_history_*.sqlite when rollout file was pruned
     const historyDbPath = findHistoryDb();
     if (!historyDbPath || !fs.existsSync(historyDbPath)) {
       return null;
@@ -130,7 +134,16 @@ export async function extractCodexSession(
                 });
               }
             } else if (row.item_type === 'agentMessage') {
-              const text = typeof data.text === 'string' ? data.text : '';
+              if (data.phase === 'commentary') continue;
+              let text = '';
+              if (typeof data.text === 'string') {
+                text = data.text;
+              } else if (Array.isArray(data.content)) {
+                text = data.content
+                  .map((c: any) => (typeof c?.text === 'string' ? c.text : ''))
+                  .filter(Boolean)
+                  .join('\n');
+              }
               const cleaned = cleanAssistantOutput(text);
               if (cleaned) {
                 rawTurns.push({
@@ -157,14 +170,14 @@ export async function extractCodexSession(
     return null;
   }
 
-  const title = sessionTitle || (firstUserPrompt ? `[来自 Codex] ${firstUserPrompt}` : '[来自 Codex] 对话接力');
+  const baseTitle = formatMirrorTitle(sessionTitle || firstUserPrompt || '对话接力');
 
   return {
     sourceAgent: 'codex',
     targetAgent: 'antigravity',
     workspacePath,
     sourceSessionId: sessionId,
-    title,
+    title: baseTitle,
     turns,
   };
 }

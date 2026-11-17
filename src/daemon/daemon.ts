@@ -12,14 +12,22 @@ import { routeSessions, type ContextProject } from "../core/router.js";
 import { discoverSessions, listContextProjects } from "../core/engine.js";
 import { loadRegistry, syncProjects } from "../projects/sync.js";
 import { ActivityTracker, ACTIVE_WINDOW_MS } from "../core/activity.js";
+import * as mirrorIndex from "../mirror/index.js";
 import { mirrorLatestSession } from "../mirror/index.js";
-import { reconcileMirrorDuplicates } from "../mirror/dedup.js";
-import { isMirrorTarget } from "../mirror/state.js";
+import { reconcileMirrorDuplicates, shouldSkipMirroredSession } from "../mirror/dedup.js";
 
 export const PID_FILE = path.join(AMUX_HOME, "daemon.pid");
 export const LOG_FILE = path.join(AMUX_HOME, "daemon.log");
 export const HEALTH_FILE = path.join(AMUX_HOME, "daemon-health.json");
 const EVENTS_FILE = path.join(AMUX_HOME, "mirror-events.jsonl");
+
+function isBenignEmptyError(error: unknown): boolean {
+  if ("isBenignEmptyMirrorError" in mirrorIndex && typeof mirrorIndex.isBenignEmptyMirrorError === "function") {
+    return mirrorIndex.isBenignEmptyMirrorError(error);
+  }
+  const msg = error instanceof Error ? error.message : String(error ?? "");
+  return /没有可提取的有效对话(?:内容|轮次)|既未找到 Codex 会话，也未找到 Antigravity 会话|未找到 (?:Codex|Antigravity) 在工作区 .* 的活跃会话/.test(msg);
+}
 
 export function daemonPid(): number | null {
   try {
@@ -48,6 +56,17 @@ export function stopDaemon(): boolean {
   if (!pid) return false;
   process.kill(pid, "SIGTERM");
   return true;
+}
+
+interface PendingMirrorJob {
+  workspacePath: string;
+  source: "codex" | "antigravity";
+  project: string;
+  due: number;
+  first: number;
+  attempts: number;
+  sessionId?: string;
+  pinSessionId?: boolean;
 }
 
 export async function runDaemon(opts: { quiet?: boolean } = {}): Promise<void> {
@@ -82,7 +101,8 @@ export async function runDaemon(opts: { quiet?: boolean } = {}): Promise<void> {
     heartbeat();
   };
   let projects: ContextProject[] = [];
-  const pending = new Map<string, { workspacePath: string; source: "codex" | "antigravity"; project: string; due: number; first: number; attempts: number }>();
+  const pending = new Map<string, PendingMirrorJob>();
+  const watchedTargets = new Set<string>();
   let stopping = false;
   let draining = false;
   let scanning = false;
@@ -90,12 +110,62 @@ export async function runDaemon(opts: { quiet?: boolean } = {}): Promise<void> {
   let tracker = new ActivityTracker();
   let watcher: FSWatcher | undefined;
 
-  const schedule = (workspacePath: string, source: "codex" | "antigravity", project: string, attempts = 0) => {
-    const key = `${source}:${workspacePath}`;
-    const first = pending.get(key)?.first ?? Date.now();
-    pending.set(key, { workspacePath, source, project, first, attempts,
-      due: Math.min(Date.now() + cfg.context.debounceMs, first + 15000) });
+  const currentWatchTargets = () =>
+    [...new Set(getHarnesses().flatMap((harness) => harness.watchTargets()))].filter(exists);
+
+  const syncWatchTargets = () => {
+    if (!watcher || typeof (watcher as { add?: unknown }).add !== "function") return;
+    const fresh: string[] = [];
+    for (const target of currentWatchTargets()) {
+      if (!watchedTargets.has(target)) {
+        watchedTargets.add(target);
+        fresh.push(target);
+      }
+    }
+    if (fresh.length > 0) watcher.add(fresh);
   };
+
+  const schedule = (
+    workspacePath: string,
+    source: "codex" | "antigravity",
+    project: string,
+    attempts = 0,
+    sessionId?: string
+  ) => {
+    const baseKey = `${source}:${workspacePath}`;
+    const existingBase = pending.get(baseKey);
+
+    if (!sessionId || !existingBase || existingBase.sessionId === sessionId) {
+      const first = existingBase?.first ?? Date.now();
+      pending.set(baseKey, {
+        workspacePath,
+        source,
+        project,
+        first,
+        attempts,
+        sessionId: sessionId ?? existingBase?.sessionId,
+        pinSessionId: existingBase?.pinSessionId ?? false,
+        due: Math.min(Date.now() + cfg.context.debounceMs, first + 15000),
+      });
+      return;
+    }
+
+    // Multiple distinct sessions in the same workspace changed concurrently: pin both so neither overwrites the other
+    existingBase.pinSessionId = true;
+    const sessionKey = `${baseKey}#${sessionId}`;
+    const first = pending.get(sessionKey)?.first ?? Date.now();
+    pending.set(sessionKey, {
+      workspacePath,
+      source,
+      project,
+      first,
+      attempts,
+      sessionId,
+      pinSessionId: true,
+      due: Math.min(Date.now() + cfg.context.debounceMs, first + 15000),
+    });
+  };
+
   const refreshProjects = async (apply = false) => {
     if (projectSyncing) return;
     projectSyncing = true;
@@ -113,20 +183,23 @@ export async function runDaemon(opts: { quiet?: boolean } = {}): Promise<void> {
     } catch (error) { recordError(error); log("projects", health.lastError, "error"); }
     finally { projectSyncing = false; }
   };
+
   const scan = () => {
     if (stopping || scanning) return;
     scanning = true;
     try {
+      syncWatchTargets();
       const changed = tracker.changed(discoverSessions(Date.now() - ACTIVE_WINDOW_MS));
       const routed = routeSessions(changed, projects);
       for (const [key, sessions] of routed) {
         const project = projects.find((candidate) => candidate.key === key);
         if (!project) continue;
         for (const session of sessions) {
-          if (session.harness !== "codex" && session.harness !== "antigravity") continue;
-          if (isMirrorTarget(session.id) || /\[来自 (Codex|Antigravity)\]/.test(session.title ?? "")) continue;
+          const source: "codex" | "antigravity" | null = session.harness === "codex" ? "codex" : session.harness === "antigravity" ? "antigravity" : null;
+          if (!source) continue;
+          if (shouldSkipMirroredSession(source, session.id, session.title, session.file)) continue;
           const workspace = session.paths.find((candidate) => project.roots.some((root) => isWithin(candidate, root)));
-          if (workspace) schedule(workspace, session.harness as "codex" | "antigravity", project.name);
+          if (workspace) schedule(workspace, source, project.name, 0, session.id);
         }
       }
       health.lastScanAt = new Date().toISOString();
@@ -134,6 +207,7 @@ export async function runDaemon(opts: { quiet?: boolean } = {}): Promise<void> {
     } catch (error) { recordError(error); log("daemon", health.lastError, "error"); }
     finally { scanning = false; }
   };
+
   const drain = async () => {
     if (draining || stopping) return;
     draining = true;
@@ -145,7 +219,11 @@ export async function runDaemon(opts: { quiet?: boolean } = {}): Promise<void> {
         health.activeJobs = 1;
         heartbeat();
         try {
-          const result = await mirrorLatestSession({ workspacePath: job.workspacePath, source: job.source });
+          const mirrorOpts =
+            job.pinSessionId && job.sessionId
+              ? { workspacePath: job.workspacePath, source: job.source, sourceSessionId: job.sessionId }
+              : { workspacePath: job.workspacePath, source: job.source };
+          const result = await mirrorLatestSession(mirrorOpts);
           if (result.skipped && job.attempts > 0) {
             health.lastSuccessAt = new Date().toISOString();
             fs.appendFileSync(EVENTS_FILE, JSON.stringify({ ...result, sourceAgent: job.source,
@@ -159,6 +237,10 @@ export async function runDaemon(opts: { quiet?: boolean } = {}): Promise<void> {
             log("mirror", `${job.project} → ${result.targetAgent}「${result.title}」（${result.turnCount} 条消息）`);
           }
         } catch (error) {
+          if (isBenignEmptyError(error)) {
+            // Newly created blank chat tabs have no turns yet; wait for real file activity instead of marking degraded
+            continue;
+          }
           recordError(error);
           fs.appendFileSync(EVENTS_FILE, JSON.stringify({ timestamp: health.lastErrorAt,
             sourceAgent: job.source, targetAgent: job.source === "codex" ? "antigravity" : "codex",
@@ -206,19 +288,21 @@ export async function runDaemon(opts: { quiet?: boolean } = {}): Promise<void> {
   if (stopping) return;
   scan();
   // Recover failed channels even when their source is older than the active-session window.
-  const previousChannels = new Map<string, { sourceAgent: "codex" | "antigravity"; workspacePath: string; status: string }>();
+  const previousChannels = new Map<string, { sourceAgent: "codex" | "antigravity"; workspacePath: string; status: string; error?: string }>();
   for (const line of readTailLines(EVENTS_FILE, 2000)) {
-    const event = parseJsonLine<{ sourceAgent: "codex" | "antigravity"; workspacePath: string; status: string }>(line);
+    const event = parseJsonLine<{ sourceAgent: "codex" | "antigravity"; workspacePath: string; status: string; error?: string }>(line);
     if (!event?.workspacePath || !["codex", "antigravity"].includes(event.sourceAgent)) continue;
     previousChannels.set(`${event.sourceAgent}:${event.workspacePath}`, event);
   }
   for (const event of previousChannels.values()) {
     if (event.status !== "error") continue;
+    if (event.error && isBenignEmptyError(event.error)) continue;
     const project = projects.find((candidate) => candidate.roots.some((root) => isWithin(event.workspacePath, root)));
     if (project) schedule(event.workspacePath, event.sourceAgent, project.name, 1);
   }
-  const targets = [...new Set(getHarnesses().flatMap((harness) => harness.watchTargets()))].filter(exists);
-  watcher = watch(targets, { ignoreInitial: true, depth: 1 });
+  const initialTargets = currentWatchTargets();
+  for (const t of initialTargets) watchedTargets.add(t);
+  watcher = watch(initialTargets, { ignoreInitial: true, depth: 1 });
   let watchTimer: NodeJS.Timeout | undefined;
   watcher.on("all", () => {
     if (watchTimer) return;

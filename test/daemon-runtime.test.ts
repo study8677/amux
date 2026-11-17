@@ -229,6 +229,27 @@ describe("daemon supervisor", () => {
     lock.close();
   });
 
+  it("treats empty 0-turn sessions as benign skips instead of errors or retry loops", async () => {
+    mocks.mirror.mockRejectedValueOnce(new Error("Codex 会话中没有可提取的有效对话轮次"));
+    addSession("blank-tab");
+    await start();
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(mocks.mirror).toHaveBeenCalledTimes(1);
+    const health = JSON.parse(fs.readFileSync(path.join(home, "daemon-health.json"), "utf8"));
+    expect(health.errorCount).toBe(0);
+    expect(health.lastError).toBe("");
+    expect(fs.existsSync(path.join(home, "mirror-events.jsonl"))).toBe(false);
+  });
+
+  it("pins sourceSessionId when multiple sessions in the same workspace update concurrently", async () => {
+    addSession("codex-tab-1", "codex");
+    addSession("codex-tab-2", "codex");
+    await start();
+    await vi.advanceTimersByTimeAsync(3500);
+    expect(mocks.mirror).toHaveBeenCalledTimes(2);
+    expect(mocks.mirror.mock.calls.map(([o]) => o.sourceSessionId).sort()).toEqual(["codex-tab-1", "codex-tab-2"]);
+  });
+
   it("releases the PID file and SQLite lock on graceful shutdown", async () => {
     await start();
     process.emit("SIGTERM");

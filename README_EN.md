@@ -6,7 +6,7 @@
 
 [![GitHub Stars](https://img.shields.io/github/stars/study8677/amux?style=for-the-badge&logo=github&color=gold)](https://github.com/study8677/amux/stargazers)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge)](https://opensource.org/licenses/MIT)
-[![Node.js Version](https://img.shields.io/badge/node-%3E%3D20-brightgreen.svg?style=for-the-badge&logo=node.js)](https://nodejs.org)
+[![Node.js Version](https://img.shields.io/badge/node-%3E%3D22-brightgreen.svg?style=for-the-badge&logo=node.js)](https://nodejs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.0+-blue.svg?style=for-the-badge&logo=typescript)](https://www.typescriptlang.org/)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-orange.svg?style=for-the-badge)](https://github.com/study8677/amux/pulls)
 
@@ -38,7 +38,7 @@ If you frequently juggle between **OpenAI Codex** and **Google Antigravity** dur
 
 ### 🗂 2. Bi-directional Project Alignment
 - Discovers project roots across Codex and Antigravity.
-- Real-time two-way synchronization for project creation, renaming, and deletion with automated pre-operation backups and a safety circuit breaker (pauses bulk deletions > 30%).
+- Real-time two-way synchronization for project creation, renaming, and deletion with automated pre-operation backups and a safety circuit breaker (pauses bulk deletions exceeding `maxAutoDeletes`, default 2).
 
 ### ⚡ 3. Invisible Background Daemon
 - Runs silently with near-zero CPU and memory footprint (< 40MB).
@@ -163,7 +163,7 @@ amux daemon log           # Tail daemon mirroring logs
 
 1. **Non-Invasive Protocol Calls**: amux uses Codex's official internal `app-server` JSON-RPC interface for creating and injecting threads. It never performs raw writes to Codex's master SQLite database while the app is active.
 2. **Automatic Snapshots**: Any modification to project definitions creates a timestamped backup in `~/.amux/backups/`.
-3. **Delete Circuit Breaker**: If an automated sync detects that more than 30% of projects are slated for deletion, it pauses and demands explicit user confirmation.
+3. **Delete Circuit Breaker**: If an automated sync detects deletions exceeding `maxAutoDeletes` (default 2), it pauses and demands explicit `--yes --force-delete` user confirmation.
 
 ---
 

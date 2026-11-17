@@ -4,7 +4,6 @@ import { fileURLToPath } from "node:url";
 import { Command } from "commander";
 import pc from "picocolors";
 import { resolveWorkspace, HOME_DIR } from "./core/paths.js";
-import { loadConfig, saveConfig, CONFIG_FILE } from "./core/config.js";
 import { getHarnesses } from "./harness/registry.js";
 import { label } from "./core/compactor/rules.js";
 import { syncProjects, loadRegistry, REGISTRY_FILE } from "./projects/sync.js";
@@ -24,7 +23,14 @@ program
   .description("Agent Multiplexer — 在 OpenAI Codex 与 Google Antigravity 之间双向克隆原生会话与同步项目")
   .version("0.1.0");
 
-const cliPath = () => (process.argv[1]?.endsWith(".js") ? path.resolve(process.argv[1]) : fileURLToPath(import.meta.url));
+function cliPath(): string {
+  if (process.argv[1]?.endsWith(".js")) return path.resolve(process.argv[1]);
+  const here = fileURLToPath(import.meta.url);
+  if (here.endsWith(".js")) return here;
+  const built = path.resolve(path.dirname(here), "..", "dist", "cli.js");
+  if (fs.existsSync(built)) return built;
+  throw new Error("请先执行 `npm run build` 生成 dist/cli.js 后再启动后台守护进程");
+}
 
 function describeAction(a: Action): string {
   if (a.type === "create") return `${pc.green("+ 新建")} ${pc.bold(label(a.harness))} 「${a.name}」 ${pc.dim(a.roots.map(short).join(", "))}`;
@@ -37,7 +43,7 @@ function describeAction(a: Action): string {
 program
   .command("mirror")
   .description("将当前项目最新的对话完整克隆到另一款 Agent（去除 ls/cat 等工具噪音，生成原生会话气泡）")
-  .option("-w, --workspace <path>", "工作区目录（默认为当前目录）", process.cwd())
+  .option("-w, --workspace <path>", "工作区目录（默认自动定位当前项目根目录）")
   .option("-a, --all", "对本机所有项目执行一次性全量会话镜像")
   .option("--to <agent>", "目标 Agent: codex 或 antigravity（不填则自动识别反向注入）")
   .option("--from <agent>", "源 Agent: codex 或 antigravity")
@@ -51,25 +57,29 @@ program
       }
       const projects = await listContextProjects();
       let successCount = 0;
+      const seenSources = new Set<string>();
       for (const p of projects) {
         if (!p.roots.length) continue;
-        const root = p.roots[0];
-        try {
-          const res = await mirrorLatestSession({
-            workspacePath: root,
-            source: o.from,
-            target: o.to,
-          });
-          if (!res.skipped) {
-            successCount++;
-            const targetLabel = res.targetAgent === "codex" ? "Codex" : "Antigravity";
-            console.log(`  ${pc.green("✔")} [${p.name}] 成功克隆到 ${targetLabel}「${res.title}」(${res.turnCount} 轮)`);
+        for (const root of p.roots) {
+          try {
+            const res = await mirrorLatestSession({
+              workspacePath: root,
+              source: o.from,
+              target: o.to,
+            });
+            if (res.sourceSessionId && seenSources.has(res.sourceSessionId)) continue;
+            if (res.sourceSessionId) seenSources.add(res.sourceSessionId);
+            if (!res.skipped) {
+              successCount++;
+              const targetLabel = res.targetAgent === "codex" ? "Codex" : "Antigravity";
+              console.log(`  ${pc.green("✔")} [${p.name}] 成功克隆到 ${targetLabel}「${res.title}」(${res.turnCount} 轮)`);
+            }
+          } catch {
+            // Skip roots without valid active sessions
           }
-        } catch (e) {
-          // Skip projects without valid active sessions
         }
       }
-      console.log(pc.green(`\n✔ 全量镜像完成！共新增/更新 ${successCount} 个项目的会话。`));
+      console.log(pc.green(`\n✔ 全量镜像完成！共新增/更新 ${successCount} 个会话。`));
       return;
     }
 
@@ -133,20 +143,28 @@ projects
   .command("sync")
   .description("执行双向同步，把两端的项目对齐到一致")
   .option("-y, --yes", "自动确认执行所有安全变更")
+  .option("--force-delete", "确认执行超过单次安全阈值的批量删除")
   .option("--dry-run", "仅预览，不写入任何修改")
   .action(async (o) => {
-    const res = await syncProjects({ apply: !o.dryRun && !!o.yes });
+    const shouldApply = !o.dryRun && !!o.yes;
+    const res = await syncProjects({ apply: shouldApply, confirmDeletes: !!o.forceDelete });
     console.log(pc.bold(`项目对齐计划 · 共 ${res.plan.actions.length} 项变更`) + (o.dryRun ? pc.dim(" (预览)") : ""));
     for (const a of res.plan.actions) console.log(`  ${describeAction(a)}`);
     if (res.plan.heldDeletes.length) {
       console.log(pc.red(`\n安全保护：以下 ${res.plan.heldDeletes.length} 个删除操作超过单次阈值，已被暂停：`));
       for (const a of res.plan.heldDeletes) console.log(`  ${describeAction(a)}`);
-      console.log(pc.yellow("请手动确认无误后传入 `--yes` 强制执行。"));
+      console.log(pc.yellow("请手动确认无误后执行 `amux projects sync --yes --force-delete` 强制放行。"));
     }
-    if (res.applied) {
-      console.log(pc.green(`\n✔ 已成功应用变更，统一注册表已写入 ${short(REGISTRY_FILE)}`));
+    if (shouldApply) {
+      const failures = res.applied.filter((x) => !x.ok);
+      if (failures.length) {
+        console.log(pc.red(`\n✖ 有 ${failures.length} 项变更执行失败（已保留注册表状态等待重试）：`));
+        for (const f of failures) console.log(`  ${describeAction(f.action)} → ${pc.red(f.error ?? "未知错误")}`);
+      } else {
+        console.log(pc.green(`\n✔ 已成功应用变更，统一注册表已写入 ${short(REGISTRY_FILE)}`));
+      }
       for (const h of res.hints) console.log(`  ${pc.dim(h)}`);
-    } else if (!o.dryRun && !o.yes && res.plan.actions.length) {
+    } else if (!o.dryRun && !o.yes && (res.plan.actions.length || res.plan.heldDeletes.length)) {
       console.log(pc.yellow("\n提示：未传入 `--yes`，未写入任何更改。确认请执行：\n  amux projects sync --yes"));
     }
   });
@@ -157,14 +175,15 @@ daemon
   .command("start")
   .description("在后台启动常驻守护进程")
   .action(async () => {
+    const entry = cliPath();
     const pid = daemonPid();
     if (pid && !serviceInstalled()) {
       stopDaemon();
       for (let i = 0; i < 30 && daemonPid(); i++) await new Promise((resolve) => setTimeout(resolve, 100));
       if (daemonPid()) throw new Error("旧后台进程仍在退出，请稍后重试");
     }
-    if (process.platform === "darwin") await installServices(cliPath());
-    else if (!pid) startDaemonDetached(cliPath());
+    if (process.platform === "darwin") await installServices(entry);
+    else if (!pid) startDaemonDetached(entry);
     for (let i = 0; i < 100; i++) {
       await new Promise((resolve) => setTimeout(resolve, 100));
       const health = readJson<{ pid?: number; heartbeatAt?: string }>(HEALTH_FILE, {});
@@ -232,7 +251,7 @@ program.command("dashboard")
     const port = Number(options.port);
     if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("端口必须是 1 到 65535 的整数");
     await startDashboard({ port });
-    console.log(`amux 状态页面 http://127.0.0.1:${port}`);
+    console.log(`amux 状态页面 http://127.0.0.1:port`.replace(":port", `:${port}`));
   });
 
 program.parseAsync(process.argv).catch((e) => {

@@ -84,7 +84,11 @@ export function getDashboardStatus(now = Date.now()) {
   }
   const heartbeatAgeMs = health.heartbeatAt ? now - Date.parse(health.heartbeatAt) : null;
   const healthy = alive && health.pid === pid && heartbeatAgeMs !== null && Number.isFinite(heartbeatAgeMs) && heartbeatAgeMs >= -5000 && heartbeatAgeMs <= 45000;
-  const unresolvedError = Boolean(health.lastErrorAt && (!health.lastSuccessAt || Date.parse(health.lastErrorAt) > Date.parse(health.lastSuccessAt)));
+  const unresolvedError = Boolean(
+    health.lastErrorAt &&
+      (!health.lastSuccessAt || Date.parse(health.lastErrorAt) > Date.parse(health.lastSuccessAt)) &&
+      !/没有可提取的有效对话内容|既未找到 Codex 会话，也未找到 Antigravity 会话/.test(health.lastError ?? "")
+  );
   const events: MirrorEvent[] = [];
   for (const line of readTail("mirror-events.jsonl").split("\n")) {
     if (!line.trim()) continue;
@@ -114,7 +118,11 @@ export function getDashboardStatus(now = Date.now()) {
     const key = JSON.stringify([event.sourceAgent, event.workspacePath ?? event.sourceSessionId ?? event.title]);
     if (!latestByProject.has(key)) latestByProject.set(key, event);
   }
-  const unresolvedErrors = [...latestByProject.values()].filter((event) => event.status === "error");
+  const unresolvedErrors = [...latestByProject.values()].filter(
+    (event) =>
+      event.status === "error" &&
+      !/没有可提取的有效对话(?:内容|轮次)|既未找到 Codex 会话，也未找到 Antigravity 会话/.test(event.error ?? "")
+  );
   const state: "stopped" | "degraded" | "running" = !alive ? "stopped" : !healthy || unresolvedError || unresolvedErrors.length > 0 ? "degraded" : "running";
   const verification = readJson<{ verifiedAt?: string; agent?: string; sessionId?: string; modelContinuation?: boolean; persistedReply?: boolean; independentReload?: boolean }>("verification.json", {}, warnings);
   const registry = readJson<{ initialized?: boolean; updatedAt?: string; projects?: RegistryProject[] }>("registry.json", {}, warnings);

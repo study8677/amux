@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import { CodexAppServerClient } from '../harness/codex/appserver.js';
+import { formatMirrorTitle } from './cleaner.js';
 import { findCodexProjectId } from './project-resolver.js';
 import { cleanupSupersededCodexTargets } from './dedup.js';
 import { recordMirrorTarget, sessionFingerprint } from './state.js';
@@ -27,9 +28,7 @@ export async function mirrorToCodex(session: MirrorSession): Promise<MirrorResul
     createdThreadId = threadId;
 
     // 2. Set the thread name with [来自 Antigravity] tag to prevent loopback
-    const titleWithTag = session.title.includes('[来自 Antigravity]')
-      ? session.title
-      : `${session.title} [来自 Antigravity]`;
+    const titleWithTag = formatMirrorTitle(session.title, '[来自 Antigravity]');
 
     await client.request('thread/name/set', {
       threadId,
@@ -74,7 +73,7 @@ export async function mirrorToCodex(session: MirrorSession): Promise<MirrorResul
     if (readback.thread?.id !== threadId || !readback.thread.path) throw new Error('Codex 原生会话读回失败');
     const fp = sessionFingerprint(session);
     let matched = false;
-    for (let attempt = 0; attempt < 5; attempt++) {
+    for (let attempt = 0; attempt < 25; attempt++) {
       const storedMessages = fs.readFileSync(readback.thread.path, 'utf8').split('\n').filter(Boolean)
         .map((line) => { try { return JSON.parse(line); } catch { return null; } })
         .filter((entry) => entry?.type === 'response_item' && entry.payload?.type === 'message'
@@ -85,7 +84,7 @@ export async function mirrorToCodex(session: MirrorSession): Promise<MirrorResul
         matched = true;
         break;
       }
-      if (attempt < 4) await new Promise((resolve) => setTimeout(resolve, 100));
+      if (attempt < 24) await new Promise((resolve) => setTimeout(resolve, 150));
     }
     if (!matched) {
       throw new Error('Codex 原生会话磁盘读回内容不匹配');

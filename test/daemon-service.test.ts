@@ -76,7 +76,7 @@ describe("launchd service lifecycle", () => {
     expect(fs.existsSync(path.join(runtime, "dist/chunk.js"))).toBe(true);
   });
 
-  it("reuses matching builds and versions the runtime when a chunk changes", async () => {
+  it("reuses matching builds and versions the runtime when a chunk or native addon binary changes", async () => {
     const { prepareServiceRuntime } = await import("../src/daemon/service.js");
     const first = prepareServiceRuntime(cliPath);
     expect(prepareServiceRuntime(cliPath)).toBe(first);
@@ -85,6 +85,17 @@ describe("launchd service lifecycle", () => {
     expect(second).not.toBe(first);
     expect(fs.readFileSync(path.join(path.dirname(second), "chunk.js"), "utf8")).toContain("changed");
     expect(fs.existsSync(first)).toBe(true);
+
+    // Rebuilding better_sqlite3.node in-place without bumping package.json version must also invalidate the runtime hash
+    fs.writeFileSync(
+      path.join(home, "fixture-modules/better-sqlite3/build/Release/better_sqlite3.node"),
+      "native-fixture-rebuilt-abi-new",
+    );
+    const third = prepareServiceRuntime(cliPath);
+    expect(third).not.toBe(second);
+    expect(
+      fs.readFileSync(path.join(path.dirname(path.dirname(third)), "node_modules/better-sqlite3/build/Release/better_sqlite3.node"), "utf8"),
+    ).toBe("native-fixture-rebuilt-abi-new");
   });
 
   it("disables and unloads only the daemon so the status page stays available", async () => {
