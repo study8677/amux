@@ -180,3 +180,9 @@ amux dashboard            # 单独启动本机运行状态页
 ## 📄 开源许可
 
 [MIT License](LICENSE) © [study8677](https://github.com/study8677)
+
+---
+
+## 🔗 友情链接
+
+- [LINUX DO](https://linux.do) - 新的理想型社区
